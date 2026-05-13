@@ -1,5 +1,9 @@
--- Stage C3 Position Engine migration
--- Wklej w Supabase SQL Editor i uruchom tylko raz.
+-- Legacy Stage C3 price-only migration.
+-- Stage C3.4 uses supabase/stage-c3-4-foundation.sql as the canonical,
+-- complete migration set. Keep this file only for projects that already
+-- applied the older C3 schema and need to add asset_prices separately.
+
+create extension if not exists "uuid-ossp";
 
 create table if not exists asset_prices (
   id uuid primary key default uuid_generate_v4(),

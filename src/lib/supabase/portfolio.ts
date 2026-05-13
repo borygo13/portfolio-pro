@@ -121,24 +121,29 @@ export async function listTransactions(portfolioId: string): Promise<Transaction
 }
 
 export async function createTransaction(portfolioId: string, input: CreateTransactionInput): Promise<Transaction> {
-  const payload = {
-    portfolio_id: portfolioId,
-    asset_id: input.asset_id,
-    transaction_type: input.transaction_type,
-    quantity: input.quantity,
-    price: input.price,
-    fees: input.fees || 0,
-    transaction_date: input.transaction_date,
-    notes: input.notes?.trim() || null,
-  }
-
-  const { data, error } = await supabase
-    .from('transactions')
-    .insert(payload)
-    .select('id,portfolio_id,asset_id,transaction_type,quantity,price,fees,transaction_date,notes,created_at,assets(symbol,name,asset_type,currency)')
-    .single()
+  const { data: inserted, error } = await supabase.rpc('create_transaction_checked', {
+    p_portfolio_id: portfolioId,
+    p_asset_id: input.asset_id,
+    p_transaction_type: input.transaction_type,
+    p_quantity: input.quantity,
+    p_price: input.price,
+    p_fees: input.fees || 0,
+    p_transaction_date: input.transaction_date,
+    p_notes: input.notes?.trim() || null,
+  })
 
   if (error) throw new Error(`Nie udało się dodać transakcji: ${error.message}`)
+
+  const insertedId = (inserted as { id?: string } | null)?.id
+  if (!insertedId) throw new Error('Nie udało się odczytać zapisanej transakcji.')
+
+  const { data, error: fetchError } = await supabase
+    .from('transactions')
+    .select('id,portfolio_id,asset_id,transaction_type,quantity,price,fees,transaction_date,notes,created_at,assets(symbol,name,asset_type,currency)')
+    .eq('id', insertedId)
+    .single()
+
+  if (fetchError) throw new Error(`Nie udało się pobrać zapisanej transakcji: ${fetchError.message}`)
   return data as unknown as Transaction
 }
 
