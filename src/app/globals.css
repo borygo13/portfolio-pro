@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+html { background: #020617; }
+body { margin: 0; background: #020617; }
+* { box-sizing: border-box; }
+
+@layer base {
+  body { @apply text-slate-100 antialiased; }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-3xl border border-white/10 bg-slate-950/65 shadow-soft backdrop-blur;
+  }
+  .muted { @apply text-slate-400; }
+}
+
+@layer components {
+  .input {
+    @apply w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-violet-400/60 focus:bg-white/[0.06];
+  }
+  .input option {
+    color: #020617;
+  }
+}
