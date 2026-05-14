@@ -23,16 +23,22 @@ supabase/stage-c3-4-foundation.sql
 supabase/stage-c4-1-market-history.sql
 ```
 
+4. Dla Stage C5 Portfolio Intelligence uruchom kolejną addytywną migrację:
+
+```text
+supabase/stage-c5-portfolio-intelligence.sql
+```
+
 `supabase/schema.sql` pozostaje kanonicznym snapshotem fundamentu C3.4. Starszy plik `supabase/stage-c3-price-engine.sql` jest oznaczony jako legacy i służy tylko projektom, które miały już wcześniejszą bazę C3 i potrzebowały samej tabeli `asset_prices`.
 
-4. Uruchom projekt:
+5. Uruchom projekt:
 
 ```bash
 npm install
 npm run dev
 ```
 
-5. Wejdź na:
+6. Wejdź na:
 
 ```text
 http://localhost:3000
@@ -163,3 +169,48 @@ limit 10;
 ```
 
 `vercel.json` dodaje dzienny harmonogram dla `/api/cron/prices` o 21:30 UTC.
+
+
+## Stage C5 - Portfolio Intelligence Engine
+
+Migracja `supabase/stage-c5-portfolio-intelligence.sql` dodaje warstwę analityczną bez zmiany istniejących tabel transakcji, refreshu cen ani silnika EDO.
+
+Dodaje:
+
+- `cash_ledger_entries` dla wpłat, wypłat, opłat, podatków i korekt gotówki,
+- `dividends` dla dywidend powiązanych z aktywami,
+- `portfolio_benchmarks` dla wyboru benchmarku per portfolio,
+- dodatkowe pola analityczne w `portfolio_snapshots`: dywidendy, opłaty, podatki, `allocation_breakdown` i `benchmark_asset_id`,
+- indeksy, RLS i jawne granty dla nowych tabel używanych z Supabase Data API.
+
+### Test C5 lokalnie
+
+1. Uruchom migracje C3.4, C4.1 i C5 w Supabase SQL Editor.
+2. Ustaw `.env.local` jak wyżej i uruchom:
+
+```bash
+npm install
+npm run dev
+```
+
+3. Wejdź do `Long-term -> Intelligence`.
+4. Dodaj wpłatę/wypłatę w sekcji Cash.
+5. Dodaj dywidendę dla aktywa w sekcji Dividends.
+6. Wybierz benchmark w sekcji Benchmark i upewnij się, że wybrane aktywo ma wpisy w `market_prices`.
+7. Zweryfikuj SQL:
+
+```sql
+select * from cash_ledger_entries order by entry_date desc limit 10;
+select * from dividends order by received_date desc limit 10;
+select * from portfolio_benchmarks;
+select snapshot_date, contribution, cash_value, dividends_value, fees_value, taxes_value, allocation_breakdown
+from portfolio_snapshots
+order by snapshot_date desc
+limit 10;
+```
+
+### Ograniczenia C5
+
+- Metryki performance są prostymi estymacjami z `portfolio_snapshots`, transakcji i ledgerów. Nie są jeszcze pełnym TWR/MWR.
+- Wielowalutowy cash ledger i dywidendy są zapisywane w PLN/EUR/USD, ale performance w walucie bazowej używa tylko rekordów w walucie portfolio. Przeliczanie FX dla cashflow zostaje na kolejny etap.
+- Historia alokacji korzysta z nowych snapshotów po wdrożeniu C5; starsze snapshoty nie mają `allocation_breakdown`.
