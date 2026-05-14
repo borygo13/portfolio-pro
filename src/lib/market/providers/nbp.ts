@@ -22,3 +22,26 @@ export async function getNbpRateToPln(currency: string): Promise<FxRateResult> {
 
   return { fromCurrency: ccy, toCurrency: 'PLN', rate, rateDate, source: 'NBP', fetchedAt }
 }
+
+export async function getNbpHistoricalRatesToPln(currency: string, startDate: string, endDate: string): Promise<FxRateResult[]> {
+  const ccy = normalizeCurrency(currency)
+  const fetchedAt = new Date().toISOString()
+
+  if (!ccy || ccy === 'PLN') {
+    return [{ fromCurrency: 'PLN', toCurrency: 'PLN', rate: 1, rateDate: startDate, source: 'NBP', fetchedAt }]
+  }
+
+  const res = await fetch(`https://api.nbp.pl/api/exchangerates/rates/a/${ccy}/${startDate}/${endDate}/?format=json`, { cache: 'no-store' })
+  if (!res.ok) return []
+
+  const json = await res.json()
+  const rates = Array.isArray(json?.rates) ? json.rates : []
+  return rates
+    .map((rateRow: any) => {
+      const rate = Number(rateRow?.mid)
+      const rateDate = String(rateRow?.effectiveDate ?? '')
+      if (!Number.isFinite(rate) || rate <= 0 || !rateDate) return null
+      return { fromCurrency: ccy, toCurrency: 'PLN', rate, rateDate, source: 'NBP', fetchedAt }
+    })
+    .filter(Boolean) as FxRateResult[]
+}
