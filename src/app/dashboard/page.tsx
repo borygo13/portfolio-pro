@@ -12,11 +12,13 @@ import {
   listAssets,
   listAssetPrices,
   listEdoBonds,
+  listPortfolioSnapshots,
   listTransactions,
   type Asset,
   type AssetPrice,
   type EdoBond,
   type Portfolio,
+  type PortfolioSnapshot,
   type Transaction,
 } from '@/lib/supabase/portfolio'
 import { buildPositions, buildSimpleEquityCurve, portfolioSummary, type Position } from '@/lib/position-engine'
@@ -104,12 +106,31 @@ function positionStatus(p: Position) {
   return 'Aktywna'
 }
 
+function snapshotLabel(snapshotDate: string) {
+  const date = new Date(`${snapshotDate}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return snapshotDate
+  return date.toLocaleDateString('pl-PL', { month: 'short', day: '2-digit' })
+}
+
+function buildSnapshotEquityCurve(snapshots: PortfolioSnapshot[]) {
+  return snapshots.map((snapshot) => {
+    const contribution = n(snapshot.contribution) || n(snapshot.invested_cost)
+    return {
+      month: snapshotLabel(snapshot.snapshot_date),
+      portfolio: n(snapshot.total_value),
+      contribution,
+      benchmark: contribution,
+    }
+  })
+}
+
 export default function Dashboard() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
   const [assets, setAssets] = useState<Asset[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [prices, setPrices] = useState<AssetPrice[]>([])
   const [edoBonds, setEdoBonds] = useState<EdoBond[]>([])
+  const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -120,17 +141,19 @@ export default function Dashboard() {
       const { data } = await supabase.auth.getUser()
       if (!data.user) throw new Error('Brak aktywnej sesji użytkownika.')
       const defaultPortfolio = await getDefaultPortfolio(data.user)
-      const [assetList, txList, priceList, bondList] = await Promise.all([
+      const [assetList, txList, priceList, bondList, snapshotList] = await Promise.all([
         listAssets(defaultPortfolio.id),
         listTransactions(defaultPortfolio.id),
         listAssetPrices(defaultPortfolio.id),
         listEdoBonds(defaultPortfolio.id),
+        listPortfolioSnapshots(defaultPortfolio.id),
       ])
       setPortfolio(defaultPortfolio)
       setAssets(assetList)
       setTransactions(txList)
       setPrices(priceList)
       setEdoBonds(bondList)
+      setSnapshots(snapshotList)
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się pobrać danych dashboardu.')
     } finally {
@@ -159,7 +182,9 @@ export default function Dashboard() {
   const totalLongTermPnl = summary.totalPnl + (edoSummary.currentValueAfterTax - edoSummary.principal)
   const allocation = useMemo(() => groupAllocation(positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue), [positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue])
   const rebalance = useMemo(() => buildRebalanceCandidates(positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue)[0] ?? null, [positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue])
-  const equityCurve = useMemo(() => buildSimpleEquityCurve(transactions, totalLongTermValue), [transactions, totalLongTermValue])
+  const snapshotEquityCurve = useMemo(() => buildSnapshotEquityCurve(snapshots), [snapshots])
+  const fallbackEquityCurve = useMemo(() => buildSimpleEquityCurve(transactions, totalLongTermValue), [transactions, totalLongTermValue])
+  const equityCurve = snapshotEquityCurve.length > 0 ? snapshotEquityCurve : fallbackEquityCurve
   const dividendSum = dividends.reduce((s, d) => s + d.value, 0)
   const bondPnl = edoSummary.currentValueAfterTax - edoSummary.principal
 
@@ -182,7 +207,7 @@ export default function Dashboard() {
           <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-lg font-bold text-white">Portfel vs wkład</h3>
-              <p className="mt-1 text-sm text-slate-500">Krzywa uwzględnia transakcje long-term i aktualną wartość EDO. Pełną historię dzienną dodamy w późniejszym etapie.</p>
+              <p className="mt-1 text-sm text-slate-500">Krzywa używa dziennych snapshotów portfolio, a przy ich braku wraca do prostego modelu z transakcji.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <PillButton>1M</PillButton><PillButton>3M</PillButton><PillButton>YTD</PillButton><PillButton active>ALL</PillButton>
