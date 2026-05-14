@@ -194,6 +194,56 @@ export async function listPortfolioSnapshots(portfolioId: string): Promise<Portf
   return (data ?? []) as PortfolioSnapshot[]
 }
 
+export type PriceRefreshRun = {
+  id: string
+  portfolio_id: string
+  trigger_type: 'manual' | 'cron' | 'backfill'
+  status: 'running' | 'success' | 'partial_success' | 'failed'
+  started_at: string
+  finished_at: string | null
+  requested_assets: number
+  refreshed_assets: number
+  failed_assets: number
+  error: string | null
+}
+
+export async function getLatestPriceRefreshRun(portfolioId: string): Promise<PriceRefreshRun | null> {
+  const { data, error } = await supabase
+    .from('price_refresh_runs')
+    .select('id,portfolio_id,trigger_type,status,started_at,finished_at,requested_assets,refreshed_assets,failed_assets,error')
+    .eq('portfolio_id', portfolioId)
+    .order('started_at', { ascending: false })
+    .limit(1)
+
+  if (error) throw new Error(`Nie udało się pobrać statusu refreshu cen: ${error.message}`)
+  return ((data ?? [])[0] ?? null) as PriceRefreshRun | null
+}
+
+export type MarketPriceHistoryPoint = {
+  id: string
+  portfolio_id: string
+  asset_id: string
+  price_date: string
+  close_price: number
+  close_price_base: number | null
+  base_currency: string | null
+  source_currency: string | null
+  fetched_at: string
+}
+
+export async function listMarketPriceHistory(portfolioId: string, assetId: string): Promise<MarketPriceHistoryPoint[]> {
+  const { data, error } = await supabase
+    .from('market_prices')
+    .select('id,portfolio_id,asset_id,price_date,close_price,close_price_base,base_currency,source_currency,fetched_at')
+    .eq('portfolio_id', portfolioId)
+    .eq('asset_id', assetId)
+    .order('price_date', { ascending: false })
+    .limit(180)
+
+  if (error) throw new Error(`Nie udało się pobrać historii cen aktywa: ${error.message}`)
+  return ((data ?? []) as MarketPriceHistoryPoint[]).slice().reverse()
+}
+
 export async function upsertAssetPrice(portfolioId: string, assetId: string, price: number, currency: string) {
   const payload = {
     portfolio_id: portfolioId,
