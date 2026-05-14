@@ -17,7 +17,7 @@ async function fetchPortfolioSnapshotInputs(supabase: ServerSupabase, portfolioI
     supabase.from('asset_prices').select('id,portfolio_id,asset_id,price,currency,priced_at,created_at,updated_at').eq('portfolio_id', portfolioId),
     supabase.from('edo_bonds').select('id,portfolio_id,series,quantity,purchase_price,purchase_date,interest_first_year,inflation_margin,maturity_date,created_at').eq('portfolio_id', portfolioId),
     supabase.from('cash_ledger_entries').select('id,portfolio_id,entry_type,amount,currency,entry_date,note,created_at,updated_at').eq('portfolio_id', portfolioId),
-    supabase.from('dividends').select('id,portfolio_id,asset_id,received_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at').eq('portfolio_id', portfolioId),
+    supabase.from('dividends').select('id,portfolio_id,asset_id,payment_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at').eq('portfolio_id', portfolioId),
     supabase.from('portfolio_benchmarks').select('portfolio_id,benchmark_asset_id,created_at,updated_at').eq('portfolio_id', portfolioId).maybeSingle(),
   ])
 

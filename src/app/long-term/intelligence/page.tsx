@@ -119,7 +119,7 @@ export default function PortfolioIntelligencePage() {
   })
   const [dividendForm, setDividendForm] = useState({
     asset_id: '',
-    received_date: today(),
+    payment_date: today(),
     gross_amount: '',
     tax_amount: '',
     currency: 'PLN' as SupportedCashCurrency,
@@ -267,8 +267,8 @@ export default function PortfolioIntelligencePage() {
     const gross = Number(dividendForm.gross_amount)
     const tax = Number(dividendForm.tax_amount || 0)
     const net = gross - tax
-    if (!dividendForm.asset_id || !Number.isFinite(gross) || gross < 0 || !Number.isFinite(tax) || tax < 0 || !Number.isFinite(net) || net < 0) {
-      setError('Uzupełnij aktywo oraz poprawne kwoty dywidendy: brutto, podatek i netto nie mogą być ujemne.')
+    if (!dividendForm.asset_id || !dividendForm.payment_date || !Number.isFinite(gross) || gross < 0 || !Number.isFinite(tax) || tax < 0 || !Number.isFinite(net) || net < 0) {
+      setError('Uzupełnij aktywo, datę płatności oraz poprawne kwoty dywidendy: brutto, podatek i netto nie mogą być ujemne.')
       return
     }
 
@@ -448,7 +448,7 @@ export default function PortfolioIntelligencePage() {
                   <Input type="number" step="0.01" min="0" placeholder="Podatek" value={dividendForm.tax_amount} onChange={(value) => setDividendForm((current) => ({ ...current, tax_amount: value }))} />
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
-                  <Input type="date" value={dividendForm.received_date} onChange={(value) => setDividendForm((current) => ({ ...current, received_date: value }))} />
+                  <Input type="date" value={dividendForm.payment_date} onChange={(value) => setDividendForm((current) => ({ ...current, payment_date: value }))} />
                   <Select value={dividendForm.currency} onChange={(value) => setDividendForm((current) => ({ ...current, currency: value as SupportedCashCurrency }))}>
                     {currencies.map((currency) => <option key={currency} value={currency}>{currency}</option>)}
                   </Select>
@@ -570,7 +570,7 @@ function DividendTable({ rows, onDelete, saving }: { rows: DividendRecord[]; onD
         <tbody>
           {rows.map((row) => (
             <tr key={row.id} className="border-t border-white/10 text-slate-300">
-              <td className="p-4">{formatDate(row.received_date)}</td>
+              <td className="p-4">{formatDate(row.payment_date)}</td>
               <td className="p-4"><div className="font-semibold text-white">{row.assets?.symbol ?? row.asset_id}</div><div className="text-xs text-slate-500">{row.assets?.name ?? row.note ?? '—'}</div></td>
               <td className="p-4 text-right">{PLN.format(num(row.gross_amount))} {row.currency}</td>
               <td className="p-4 text-right text-amber-200">{PLN.format(num(row.tax_amount))}</td>

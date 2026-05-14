@@ -34,7 +34,7 @@ create table if not exists dividends (
   id uuid primary key default uuid_generate_v4(),
   portfolio_id uuid not null references portfolios(id) on delete cascade,
   asset_id uuid not null references assets(id) on delete cascade,
-  received_date date not null,
+  payment_date date not null,
   gross_amount numeric not null check (gross_amount >= 0),
   tax_amount numeric not null default 0 check (tax_amount >= 0),
   net_amount numeric not null check (net_amount >= 0),
@@ -48,7 +48,7 @@ alter table dividends
   add column if not exists id uuid default uuid_generate_v4(),
   add column if not exists portfolio_id uuid references portfolios(id) on delete cascade,
   add column if not exists asset_id uuid references assets(id) on delete cascade,
-  add column if not exists received_date date,
+  add column if not exists payment_date date,
   add column if not exists gross_amount numeric check (gross_amount >= 0),
   add column if not exists tax_amount numeric default 0 check (tax_amount >= 0),
   add column if not exists net_amount numeric check (net_amount >= 0),
@@ -64,13 +64,46 @@ begin
     from information_schema.columns
     where table_schema = 'public'
       and table_name = 'dividends'
+      and column_name = 'received_date'
+  ) then
+    update dividends
+    set payment_date = coalesce(payment_date, received_date::date)
+    where payment_date is null;
+
+    alter table dividends alter column received_date drop not null;
+    alter table dividends alter column received_date drop default;
+  end if;
+
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'dividends'
+      and column_name = 'payout_date'
+  ) then
+    update dividends
+    set payment_date = coalesce(payment_date, payout_date::date)
+    where payment_date is null;
+
+    alter table dividends alter column payout_date drop not null;
+    alter table dividends alter column payout_date drop default;
+  end if;
+end $$;
+
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'dividends'
       and column_name = 'amount'
   ) then
     update dividends
     set
-      gross_amount = coalesce(gross_amount, amount, 0),
+      gross_amount = coalesce(gross_amount, amount::numeric, 0),
       tax_amount = coalesce(tax_amount, 0),
-      net_amount = coalesce(net_amount, greatest(coalesce(gross_amount, amount, 0) - coalesce(tax_amount, 0), 0))
+      net_amount = coalesce(net_amount, greatest(coalesce(gross_amount, amount::numeric, 0) - coalesce(tax_amount, 0), 0))
     where gross_amount is null
       or tax_amount is null
       or net_amount is null;
@@ -108,6 +141,15 @@ begin
     alter table dividends
       add constraint dividends_net_amount_nonnegative_chk check (net_amount >= 0) not valid;
   end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.dividends'::regclass
+      and conname = 'dividends_payment_date_present_chk'
+  ) then
+    alter table dividends
+      add constraint dividends_payment_date_present_chk check (payment_date is not null) not valid;
+  end if;
 end $$;
 
 update dividends d
@@ -138,10 +180,10 @@ alter table portfolio_snapshots
 
 create index if not exists cash_ledger_entries_portfolio_date_idx
   on cash_ledger_entries(portfolio_id, entry_date desc);
-create index if not exists dividends_portfolio_date_idx
-  on dividends(portfolio_id, received_date desc);
-create index if not exists dividends_asset_date_idx
-  on dividends(asset_id, received_date desc);
+create index if not exists dividends_portfolio_payment_date_idx
+  on dividends(portfolio_id, payment_date desc);
+create index if not exists dividends_asset_payment_date_idx
+  on dividends(asset_id, payment_date desc);
 create unique index if not exists portfolio_benchmarks_portfolio_id_uidx
   on portfolio_benchmarks(portfolio_id);
 create index if not exists portfolio_snapshots_benchmark_idx
