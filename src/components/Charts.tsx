@@ -8,6 +8,7 @@ import {
   CartesianGrid,
   Cell,
   Line,
+  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -15,7 +16,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { PLN } from '@/lib/format'
+import { PLN, PCT } from '@/lib/format'
 
 const COLORS = ['#8b5cf6', '#06b6d4', '#22c55e', '#f59e0b', '#ef4444', '#64748b']
 
@@ -94,6 +95,52 @@ export function DividendChart({ data }: { data: any[] }) {
         <Tooltip formatter={(v) => PLN.format(Number(v))} contentStyle={tooltip} />
         <Bar dataKey="value" fill="#22c55e" radius={[8, 8, 0, 0]} />
       </BarChart>
+    </ResponsiveContainer>
+  )
+}
+
+export function MonthlyDividendChart({ data }: { data: { month: string; gross: number; tax: number; net: number }[] }) {
+  return (
+    <ResponsiveContainer width="100%" height={250}>
+      <BarChart data={data} margin={{ top: 10, right: 0, left: -25, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.10)" />
+        <XAxis dataKey="month" stroke="#64748b" tickLine={false} axisLine={false} />
+        <YAxis stroke="#64748b" tickLine={false} axisLine={false} />
+        <Tooltip formatter={(v) => PLN.format(Number(v))} contentStyle={tooltip} />
+        <Bar dataKey="net" name="Netto" fill="#22c55e" radius={[8, 8, 0, 0]} />
+        <Bar dataKey="tax" name="Podatek" fill="#f59e0b" radius={[8, 8, 0, 0]} />
+      </BarChart>
+    </ResponsiveContainer>
+  )
+}
+
+export function MonthlyReturnsChart({ data }: { data: { month: string; returnPct: number }[] }) {
+  return (
+    <ResponsiveContainer width="100%" height={250}>
+      <BarChart data={data} margin={{ top: 10, right: 0, left: -25, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.10)" />
+        <XAxis dataKey="month" stroke="#64748b" tickLine={false} axisLine={false} />
+        <YAxis stroke="#64748b" tickLine={false} axisLine={false} tickFormatter={(v) => PCT.format(Number(v))} />
+        <Tooltip formatter={(v) => PCT.format(Number(v))} contentStyle={tooltip} />
+        <Bar dataKey="returnPct" name="Zwrot m/m" radius={[8, 8, 0, 0]}>
+          {data.map((entry, i) => <Cell key={i} fill={entry.returnPct >= 0 ? '#22c55e' : '#ef4444'} />)}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  )
+}
+
+export function BenchmarkComparisonChart({ data }: { data: { month: string; portfolio: number; benchmark: number }[] }) {
+  return (
+    <ResponsiveContainer width="100%" height={280}>
+      <LineChart data={data} margin={{ top: 12, right: 8, left: -15, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
+        <XAxis dataKey="month" stroke="#64748b" tickLine={false} axisLine={false} />
+        <YAxis stroke="#64748b" tickLine={false} axisLine={false} tickFormatter={(v) => `${Math.round(Number(v))}`} />
+        <Tooltip formatter={(v) => Number(v).toFixed(1)} contentStyle={tooltip} />
+        <Line type="monotone" dataKey="portfolio" name="Portfolio" stroke="#8b5cf6" strokeWidth={3} dot={false} />
+        <Line type="monotone" dataKey="benchmark" name="Benchmark" stroke="#06b6d4" strokeWidth={3} dot={false} />
+      </LineChart>
     </ResponsiveContainer>
   )
 }

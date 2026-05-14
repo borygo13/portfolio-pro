@@ -177,16 +177,28 @@ export type PortfolioSnapshot = {
   id: string
   portfolio_id: string
   snapshot_date: string
+  base_currency?: string | null
   total_value: number
+  cash_value?: number | null
   invested_cost: number
+  remaining_cost?: number | null
+  realized_pnl?: number | null
+  unrealized_pnl?: number | null
+  total_pnl?: number | null
+  net_cash_flow?: number | null
   contribution: number
+  dividends_value?: number | null
+  fees_value?: number | null
+  taxes_value?: number | null
+  allocation_breakdown?: { name: string; type: string; value: number; pct: number }[] | null
+  benchmark_asset_id?: string | null
   calculated_at: string
 }
 
 export async function listPortfolioSnapshots(portfolioId: string): Promise<PortfolioSnapshot[]> {
   const { data, error } = await supabase
     .from('portfolio_snapshots')
-    .select('id,portfolio_id,snapshot_date,total_value,invested_cost,contribution,calculated_at')
+    .select('id,portfolio_id,snapshot_date,base_currency,total_value,cash_value,invested_cost,remaining_cost,realized_pnl,unrealized_pnl,total_pnl,net_cash_flow,contribution,dividends_value,fees_value,taxes_value,allocation_breakdown,benchmark_asset_id,calculated_at')
     .eq('portfolio_id', portfolioId)
     .order('snapshot_date', { ascending: true })
 
@@ -242,6 +254,168 @@ export async function listMarketPriceHistory(portfolioId: string, assetId: strin
 
   if (error) throw new Error(`Nie udało się pobrać historii cen aktywa: ${error.message}`)
   return ((data ?? []) as MarketPriceHistoryPoint[]).slice().reverse()
+}
+
+export type CashLedgerEntryType = 'deposit' | 'withdrawal' | 'fee' | 'tax' | 'adjustment'
+export type SupportedCashCurrency = 'PLN' | 'EUR' | 'USD'
+
+export type CashLedgerEntry = {
+  id: string
+  portfolio_id: string
+  entry_type: CashLedgerEntryType
+  amount: number
+  currency: SupportedCashCurrency
+  entry_date: string
+  note: string | null
+  created_at: string
+  updated_at: string | null
+}
+
+export type CreateCashLedgerEntryInput = {
+  entry_type: CashLedgerEntryType
+  amount: number
+  currency: SupportedCashCurrency
+  entry_date: string
+  note?: string
+}
+
+export async function listCashLedgerEntries(portfolioId: string): Promise<CashLedgerEntry[]> {
+  const { data, error } = await supabase
+    .from('cash_ledger_entries')
+    .select('id,portfolio_id,entry_type,amount,currency,entry_date,note,created_at,updated_at')
+    .eq('portfolio_id', portfolioId)
+    .order('entry_date', { ascending: false })
+    .order('created_at', { ascending: false })
+
+  if (error) throw new Error(`Nie udało się pobrać cash ledger: ${error.message}`)
+  return (data ?? []) as CashLedgerEntry[]
+}
+
+export async function createCashLedgerEntry(portfolioId: string, input: CreateCashLedgerEntryInput): Promise<CashLedgerEntry> {
+  const payload = {
+    portfolio_id: portfolioId,
+    entry_type: input.entry_type,
+    amount: input.amount,
+    currency: input.currency,
+    entry_date: input.entry_date,
+    note: input.note?.trim() || null,
+    updated_at: new Date().toISOString(),
+  }
+
+  const { data, error } = await supabase
+    .from('cash_ledger_entries')
+    .insert(payload)
+    .select('id,portfolio_id,entry_type,amount,currency,entry_date,note,created_at,updated_at')
+    .single()
+
+  if (error) throw new Error(`Nie udało się dodać wpisu cash ledger: ${error.message}`)
+  return data as CashLedgerEntry
+}
+
+export async function deleteCashLedgerEntry(id: string) {
+  const { error } = await supabase.from('cash_ledger_entries').delete().eq('id', id)
+  if (error) throw new Error(`Nie udało się usunąć wpisu cash ledger: ${error.message}`)
+}
+
+export type DividendRecord = {
+  id: string
+  portfolio_id: string
+  asset_id: string
+  received_date: string
+  gross_amount: number
+  tax_amount: number
+  net_amount: number
+  currency: SupportedCashCurrency
+  note: string | null
+  created_at: string
+  updated_at: string | null
+  assets?: Pick<Asset, 'symbol' | 'name' | 'asset_type' | 'currency'> | null
+}
+
+export type CreateDividendInput = {
+  asset_id: string
+  received_date: string
+  gross_amount: number
+  tax_amount: number
+  currency: SupportedCashCurrency
+  note?: string
+}
+
+export async function listDividends(portfolioId: string): Promise<DividendRecord[]> {
+  const { data, error } = await supabase
+    .from('dividends')
+    .select('id,portfolio_id,asset_id,received_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at,assets(symbol,name,asset_type,currency)')
+    .eq('portfolio_id', portfolioId)
+    .order('received_date', { ascending: false })
+    .order('created_at', { ascending: false })
+
+  if (error) throw new Error(`Nie udało się pobrać dywidend: ${error.message}`)
+  return (data ?? []) as unknown as DividendRecord[]
+}
+
+export async function createDividend(portfolioId: string, input: CreateDividendInput): Promise<DividendRecord> {
+  const gross = Math.max(0, Number(input.gross_amount) || 0)
+  const tax = Math.max(0, Number(input.tax_amount) || 0)
+  const payload = {
+    portfolio_id: portfolioId,
+    asset_id: input.asset_id,
+    received_date: input.received_date,
+    gross_amount: gross,
+    tax_amount: tax,
+    net_amount: Math.max(0, gross - tax),
+    currency: input.currency,
+    note: input.note?.trim() || null,
+    updated_at: new Date().toISOString(),
+  }
+
+  const { data, error } = await supabase
+    .from('dividends')
+    .insert(payload)
+    .select('id,portfolio_id,asset_id,received_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at,assets(symbol,name,asset_type,currency)')
+    .single()
+
+  if (error) throw new Error(`Nie udało się dodać dywidendy: ${error.message}`)
+  return data as unknown as DividendRecord
+}
+
+export async function deleteDividend(id: string) {
+  const { error } = await supabase.from('dividends').delete().eq('id', id)
+  if (error) throw new Error(`Nie udało się usunąć dywidendy: ${error.message}`)
+}
+
+export type PortfolioBenchmark = {
+  portfolio_id: string
+  benchmark_asset_id: string | null
+  created_at: string
+  updated_at: string | null
+}
+
+export async function getPortfolioBenchmark(portfolioId: string): Promise<PortfolioBenchmark | null> {
+  const { data, error } = await supabase
+    .from('portfolio_benchmarks')
+    .select('portfolio_id,benchmark_asset_id,created_at,updated_at')
+    .eq('portfolio_id', portfolioId)
+    .maybeSingle()
+
+  if (error) throw new Error(`Nie udało się pobrać benchmarku: ${error.message}`)
+  return data as PortfolioBenchmark | null
+}
+
+export async function upsertPortfolioBenchmark(portfolioId: string, benchmarkAssetId: string | null): Promise<PortfolioBenchmark> {
+  const payload = {
+    portfolio_id: portfolioId,
+    benchmark_asset_id: benchmarkAssetId || null,
+    updated_at: new Date().toISOString(),
+  }
+
+  const { data, error } = await supabase
+    .from('portfolio_benchmarks')
+    .upsert(payload, { onConflict: 'portfolio_id' })
+    .select('portfolio_id,benchmark_asset_id,created_at,updated_at')
+    .single()
+
+  if (error) throw new Error(`Nie udało się zapisać benchmarku: ${error.message}`)
+  return data as PortfolioBenchmark
 }
 
 export async function upsertAssetPrice(portfolioId: string, assetId: string, price: number, currency: string) {
