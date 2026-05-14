@@ -19,6 +19,9 @@ export type Asset = {
   asset_type: string
   currency: string | null
   target_allocation: number | null
+  market_symbol?: string | null
+  price_source?: string | null
+  auto_refresh_enabled?: boolean | null
   created_at: string
 }
 
@@ -48,7 +51,7 @@ export async function getDefaultPortfolio(user: User): Promise<Portfolio> {
 export async function listAssets(portfolioId: string): Promise<Asset[]> {
   const { data, error } = await supabase
     .from('assets')
-    .select('id,portfolio_id,symbol,name,asset_type,currency,target_allocation,created_at')
+    .select('id,portfolio_id,symbol,name,asset_type,currency,target_allocation,market_symbol,price_source,auto_refresh_enabled,created_at')
     .eq('portfolio_id', portfolioId)
     .order('created_at', { ascending: false })
 
@@ -69,7 +72,7 @@ export async function createAsset(portfolioId: string, input: CreateAssetInput):
   const { data, error } = await supabase
     .from('assets')
     .insert(payload)
-    .select('id,portfolio_id,symbol,name,asset_type,currency,target_allocation,created_at')
+    .select('id,portfolio_id,symbol,name,asset_type,currency,target_allocation,market_symbol,price_source,auto_refresh_enabled,created_at')
     .single()
 
   if (error) throw new Error(`Nie udało się dodać aktywa: ${error.message}`)
@@ -243,14 +246,38 @@ export type MarketPriceHistoryPoint = {
   fetched_at: string
 }
 
-export async function listMarketPriceHistory(portfolioId: string, assetId: string): Promise<MarketPriceHistoryPoint[]> {
-  const { data, error } = await supabase
+export const CHART_RANGES = ['30D', '90D', '1Y', '3Y', '5Y', 'MAX'] as const
+export type ChartRange = typeof CHART_RANGES[number]
+
+function chartRangeStartDate(range: ChartRange) {
+  if (range === 'MAX') return null
+  const days = range === '30D' ? 30 : range === '90D' ? 90 : range === '1Y' ? 365 : range === '3Y' ? 365 * 3 : 365 * 5
+  const date = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+  return date.toISOString().slice(0, 10)
+}
+
+function chartRangeLimit(range: ChartRange) {
+  if (range === '30D') return 90
+  if (range === '90D') return 180
+  if (range === '1Y') return 420
+  if (range === '3Y') return 1200
+  if (range === '5Y') return 2200
+  return 5000
+}
+
+export async function listMarketPriceHistory(portfolioId: string, assetId: string, range: ChartRange = '1Y'): Promise<MarketPriceHistoryPoint[]> {
+  let query = supabase
     .from('market_prices')
     .select('id,portfolio_id,asset_id,price_date,close_price,close_price_base,base_currency,source_currency,fetched_at')
     .eq('portfolio_id', portfolioId)
     .eq('asset_id', assetId)
+
+  const startDate = chartRangeStartDate(range)
+  if (startDate) query = query.gte('price_date', startDate)
+
+  const { data, error } = await query
     .order('price_date', { ascending: false })
-    .limit(180)
+    .limit(chartRangeLimit(range))
 
   if (error) throw new Error(`Nie udało się pobrać historii cen aktywa: ${error.message}`)
   return ((data ?? []) as MarketPriceHistoryPoint[]).slice().reverse()
@@ -507,7 +534,7 @@ export async function deleteEdoBond(id: string) {
   if (error) throw new Error(`Nie udało się usunąć obligacji EDO: ${error.message}`)
 }
 
-export type UpdateAssetInput = Partial<CreateAssetInput>
+export type UpdateAssetInput = Partial<CreateAssetInput> & { market_symbol?: string | null }
 
 export async function updateAsset(assetId: string, input: UpdateAssetInput): Promise<Asset> {
   const payload: Record<string, any> = {}
@@ -516,14 +543,19 @@ export async function updateAsset(assetId: string, input: UpdateAssetInput): Pro
   if (input.asset_type !== undefined) payload.asset_type = input.asset_type
   if (input.currency !== undefined) payload.currency = input.currency.trim().toUpperCase()
   if (input.target_allocation !== undefined) payload.target_allocation = input.target_allocation || 0
+  if (input.market_symbol !== undefined) payload.market_symbol = input.market_symbol?.trim() || null
 
   const { data, error } = await supabase
     .from('assets')
     .update(payload)
     .eq('id', assetId)
-    .select('id,portfolio_id,symbol,name,asset_type,currency,target_allocation,created_at')
+    .select('id,portfolio_id,symbol,name,asset_type,currency,target_allocation,market_symbol,price_source,auto_refresh_enabled,created_at')
     .single()
 
   if (error) throw new Error(`Nie udało się zaktualizować aktywa: ${error.message}`)
   return data as Asset
+}
+
+export async function updateAssetMarketSymbol(assetId: string, marketSymbol: string | null): Promise<Asset> {
+  return updateAsset(assetId, { market_symbol: marketSymbol })
 }

@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import type { ButtonHTMLAttributes } from 'react'
 import clsx from 'clsx'
 import { AuthGate, AuthStatus } from '@/components/AuthGate'
 import {
@@ -215,9 +216,9 @@ export function TrustBadge({ children }: { children: React.ReactNode }) {
   return <span className="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300"><ShieldCheck size={14} />{children}</span>
 }
 
-export function PillButton({ children, active = false }: { children: React.ReactNode; active?: boolean }) {
+export function PillButton({ children, active = false, ...props }: { children: React.ReactNode; active?: boolean } & ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
-    <button className={clsx('rounded-full px-3 py-1.5 text-xs font-semibold transition', active ? 'bg-violet-500 text-white shadow-lg shadow-violet-950/40' : 'bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white')}>
+    <button {...props} className={clsx('rounded-full px-3 py-1.5 text-xs font-semibold transition', active ? 'bg-violet-500 text-white shadow-lg shadow-violet-950/40' : 'bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white', props.className)}>
       {children}
     </button>
   )
