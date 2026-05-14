@@ -10,12 +10,14 @@ export type BackfillScope = 'asset' | 'all_active'
 export type BackfillAssetStatus = 'success' | 'partial' | 'failed' | 'skipped'
 
 export const MAX_BACKFILL_ASSETS_PER_REQUEST = 5
-const MAX_ROWS_PER_ASSET_PER_REQUEST = 2500
+const SELECTED_ASSET_MAX_ROWS_PER_REQUEST = 5000
+const ALL_ACTIVE_MAX_ROWS_PER_ASSET = 2500
 const UPSERT_CHUNK_SIZE = 200
 const FX_RANGE_CHUNK_DAYS = 90
+const CRYPTOCOMPARE_CHUNK_LIMIT = 2000
 const DAY_MS = 24 * 60 * 60 * 1000
 
-type HistoricalSource = 'coingecko' | 'stooq'
+type HistoricalSource = 'coingecko' | 'cryptocompare' | 'stooq'
 
 type HistoricalPricePoint = {
   assetId: string
@@ -115,7 +117,31 @@ function providerSymbolError() {
   return 'Sprawdź market_symbol. Przykłady: iusq.de, aapl.us, msft.us, btc via CoinGecko bitcoin.'
 }
 
-function mapCryptoPoint(asset: AssetForPricing, id: string, date: string, price: number): RawHistoricalPricePoint {
+function responsePreview(text: string) {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 220)
+}
+
+function backfillHeaders() {
+  return {
+    Accept: 'application/json,text/csv,text/plain,*/*',
+    'User-Agent': 'portfolio-pro-backfill/1.0',
+  }
+}
+
+function cryptoCompareSymbol(asset: AssetForPricing) {
+  const ticker = asset.symbol.trim().toUpperCase()
+  if (ticker === 'XBT') return 'BTC'
+  return ticker
+}
+
+function mapCryptoPoint(
+  asset: AssetForPricing,
+  id: string,
+  date: string,
+  price: number,
+  provider: Extract<HistoricalSource, 'coingecko' | 'cryptocompare'> = 'coingecko',
+  ohlc: { open?: number | null; high?: number | null; low?: number | null } = {},
+): RawHistoricalPricePoint {
   const fetchedAt = new Date().toISOString()
   return {
     assetId: asset.id,
@@ -123,11 +149,11 @@ function mapCryptoPoint(asset: AssetForPricing, id: string, date: string, price:
     symbol: asset.symbol,
     source: `CoinGecko ${id}`,
     sourceSymbol: id,
-    provider: 'coingecko',
+    provider,
     priceDate: date,
-    openPrice: null,
-    highPrice: null,
-    lowPrice: null,
+    openPrice: ohlc.open ?? null,
+    highPrice: ohlc.high ?? null,
+    lowPrice: ohlc.low ?? null,
     closePrice: price,
     adjustedClosePrice: price,
     sourceCurrency: 'PLN',
@@ -139,13 +165,30 @@ function mapCryptoPoint(asset: AssetForPricing, id: string, date: string, price:
 async function fetchCoinGeckoHistory(asset: AssetForPricing, range: BackfillRange): Promise<RawHistoricalPricePoint[]> {
   const id = resolveCoinGeckoId(asset)
   const { startDate, endDate } = rangeWindow(range)
-  const fromSeconds = startDate ? Math.floor(new Date(`${startDate}T00:00:00.000Z`).getTime() / 1000) : 0
-  const toSeconds = Math.floor(new Date(`${endDate}T23:59:59.999Z`).getTime() / 1000)
-  const url = `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(id)}/market_chart/range?vs_currency=pln&from=${fromSeconds}&to=${toSeconds}&precision=full`
-  const res = await fetch(url, { cache: 'no-store' })
-  if (!res.ok) throw new Error(`CoinGecko HTTP ${res.status}. ${providerSymbolError()}`)
+  const url = new URL(`https://api.coingecko.com/api/v3/coins/${encodeURIComponent(id)}/market_chart/range`)
+  url.searchParams.set('vs_currency', 'pln')
+  url.searchParams.set('from', startDate ?? '2013-01-01')
+  url.searchParams.set('to', endDate)
+  url.searchParams.set('interval', 'daily')
+  url.searchParams.set('precision', 'full')
 
-  const json = await res.json()
+  let res: Response
+  try {
+    res = await fetch(url, { cache: 'no-store', headers: backfillHeaders() })
+  } catch (err: any) {
+    throw new Error(`CoinGecko request failed for ${id}: ${err?.message ?? 'fetch failed'}`)
+  }
+
+  const text = await res.text()
+  if (!res.ok) throw new Error(`CoinGecko returned HTTP ${res.status} for ${id} ${range}. ${responsePreview(text)}`)
+
+  let json: any
+  try {
+    json = JSON.parse(text)
+  } catch {
+    throw new Error(`CoinGecko returned invalid JSON for ${id} ${range}. Preview: ${responsePreview(text)}`)
+  }
+
   const prices = Array.isArray(json?.prices) ? json.prices : []
   const byDate = new Map<string, number>()
 
@@ -160,31 +203,145 @@ async function fetchCoinGeckoHistory(asset: AssetForPricing, range: BackfillRang
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, price]) => mapCryptoPoint(asset, id, date, price))
 
-  if (rows.length === 0) throw new Error(`Brak historii CoinGecko dla ${id}. ${providerSymbolError()}`)
+  if (rows.length === 0) throw new Error(`CoinGecko returned no prices for ${id} ${range}. ${providerSymbolError()}`)
   return rows
+}
+
+function cryptoCompareUrl(symbol: string, limit: number, toTs: number) {
+  const url = new URL('https://min-api.cryptocompare.com/data/v2/histoday')
+  url.searchParams.set('fsym', symbol)
+  url.searchParams.set('tsym', 'PLN')
+  url.searchParams.set('limit', String(limit))
+  url.searchParams.set('toTs', String(toTs))
+  return url
+}
+
+async function fetchCryptoCompareChunk(symbol: string, limit: number, toTs: number) {
+  const url = cryptoCompareUrl(symbol, limit, toTs)
+  let res: Response
+  try {
+    res = await fetch(url, { cache: 'no-store', headers: backfillHeaders() })
+  } catch (err: any) {
+    throw new Error(`CryptoCompare request failed for ${symbol}/PLN: ${err?.message ?? 'fetch failed'}`)
+  }
+
+  const text = await res.text()
+  if (!res.ok) throw new Error(`CryptoCompare returned HTTP ${res.status} for ${symbol}/PLN. ${responsePreview(text)}`)
+
+  let json: any
+  try {
+    json = JSON.parse(text)
+  } catch {
+    throw new Error(`CryptoCompare returned invalid JSON for ${symbol}/PLN. Preview: ${responsePreview(text)}`)
+  }
+
+  if (json?.Response !== 'Success') {
+    throw new Error(`CryptoCompare failed for ${symbol}/PLN. ${responsePreview(String(json?.Message ?? text))}`)
+  }
+
+  return Array.isArray(json?.Data?.Data) ? json.Data.Data : []
+}
+
+async function fetchCryptoCompareHistory(asset: AssetForPricing, range: BackfillRange, maxRows: number): Promise<RawHistoricalPricePoint[]> {
+  const id = resolveCoinGeckoId(asset)
+  const symbol = cryptoCompareSymbol(asset)
+  const { startDate, endDate } = rangeWindow(range)
+  const endTs = Math.floor(new Date(`${endDate}T23:59:59.999Z`).getTime() / 1000)
+  const rangeDays = startDate ? Math.ceil((new Date(`${endDate}T00:00:00.000Z`).getTime() - new Date(`${startDate}T00:00:00.000Z`).getTime()) / DAY_MS) : maxRows
+  const targetRows = Math.min(maxRows, Math.max(1, rangeDays + 2))
+  const byDate = new Map<string, RawHistoricalPricePoint>()
+  let toTs = endTs
+
+  while (byDate.size < targetRows) {
+    const limit = Math.min(CRYPTOCOMPARE_CHUNK_LIMIT, Math.max(1, targetRows - byDate.size - 1))
+    const chunkRows = await fetchCryptoCompareChunk(symbol, limit, toTs)
+    if (chunkRows.length === 0) break
+
+    let oldestTs = Number.POSITIVE_INFINITY
+    for (const row of chunkRows) {
+      const timestamp = asNumber(row?.time)
+      const close = asNumber(row?.close)
+      if (!timestamp || !close || close <= 0) continue
+      oldestTs = Math.min(oldestTs, timestamp)
+      const priceDate = formatDate(new Date(timestamp * 1000))
+      if (priceDate > endDate) continue
+      if (startDate && priceDate < startDate) continue
+
+      byDate.set(priceDate, mapCryptoPoint(asset, id, priceDate, close, 'cryptocompare', {
+        open: asNumber(row?.open),
+        high: asNumber(row?.high),
+        low: asNumber(row?.low),
+      }))
+    }
+
+    if (!Number.isFinite(oldestTs)) break
+    const nextToTs = oldestTs - 1
+    if (nextToTs >= toTs) break
+    toTs = nextToTs
+    if (startDate && formatDate(new Date(toTs * 1000)) < startDate) break
+  }
+
+  const rows = Array.from(byDate.values()).sort((a, b) => a.priceDate.localeCompare(b.priceDate))
+  if (rows.length === 0) throw new Error(`CryptoCompare returned no prices for ${symbol}/PLN ${range}. ${providerSymbolError()}`)
+  return rows
+}
+
+async function fetchCryptoHistory(asset: AssetForPricing, range: BackfillRange, maxRows: number): Promise<RawHistoricalPricePoint[]> {
+  if (range === '1Y') {
+    try {
+      return await fetchCoinGeckoHistory(asset, range)
+    } catch {
+      return fetchCryptoCompareHistory(asset, range, maxRows)
+    }
+  }
+
+  return fetchCryptoCompareHistory(asset, range, maxRows)
 }
 
 async function fetchStooqHistory(asset: AssetForPricing, range: BackfillRange): Promise<RawHistoricalPricePoint[]> {
   const symbol = normalizeStooqSymbol(asset)
   const sourceCurrency = (asset.currency ?? 'PLN').toUpperCase()
   const { startDate, endDate } = rangeWindow(range)
-  const params = new URLSearchParams({ s: symbol, i: 'd' })
-  if (startDate) params.set('d1', compactDate(startDate))
-  params.set('d2', compactDate(endDate))
+  const url = new URL('https://stooq.com/q/d/l/')
+  url.searchParams.set('s', symbol)
+  if (startDate) url.searchParams.set('d1', compactDate(startDate))
+  url.searchParams.set('d2', compactDate(endDate))
+  url.searchParams.set('i', 'd')
+  const stooqApiKey = process.env.STOOQ_API_KEY?.trim()
+  if (stooqApiKey) url.searchParams.set('apikey', stooqApiKey)
 
-  const res = await fetch(`https://stooq.pl/q/d/l/?${params.toString()}`, { cache: 'no-store' })
-  if (!res.ok) throw new Error(`Stooq HTTP ${res.status}. ${providerSymbolError()}`)
+  let res: Response
+  try {
+    res = await fetch(url, { cache: 'no-store', headers: backfillHeaders() })
+  } catch (err: any) {
+    throw new Error(`Stooq request failed for ${symbol} on stooq.com: ${err?.message ?? 'fetch failed'}`)
+  }
 
   const csv = await res.text()
+  if (!res.ok) throw new Error(`Stooq returned HTTP ${res.status} for ${symbol} on stooq.com. Preview: ${responsePreview(csv)}`)
+  if (/get your apikey|uzyskaj apikey/i.test(csv)) {
+    throw new Error(`Stooq historical CSV requires an API key for ${symbol}. Set STOOQ_API_KEY server-side. Preview: ${responsePreview(csv)}`)
+  }
+
   const lines = csv.trim().split(/\r?\n/).filter(Boolean)
   const delimiter = lines[0]?.includes(';') ? ';' : ','
+  const header = (lines[0] ?? '').split(delimiter).map((item) => item.trim().toLowerCase())
+  const dateIndex = header.indexOf('date')
+  const openIndex = header.indexOf('open')
+  const highIndex = header.indexOf('high')
+  const lowIndex = header.indexOf('low')
+  const closeIndex = header.indexOf('close')
+  if (dateIndex < 0 || closeIndex < 0) {
+    throw new Error(`Stooq CSV header was not recognized for ${symbol} on stooq.com. Preview: ${responsePreview(csv)}`)
+  }
+
   const rows: RawHistoricalPricePoint[] = []
   const fetchedAt = new Date().toISOString()
 
   for (const line of lines.slice(1)) {
     const row = line.split(delimiter)
-    const priceDate = row[0]?.trim()
-    const close = asNumber(row[4])
+    const priceDate = row[dateIndex]?.trim()
+    const close = asNumber(row[closeIndex])
     if (!priceDate || !close || close <= 0) continue
 
     rows.push({
@@ -195,9 +352,9 @@ async function fetchStooqHistory(asset: AssetForPricing, range: BackfillRange): 
       sourceSymbol: symbol,
       provider: 'stooq',
       priceDate,
-      openPrice: asNumber(row[1]),
-      highPrice: asNumber(row[2]),
-      lowPrice: asNumber(row[3]),
+      openPrice: openIndex >= 0 ? asNumber(row[openIndex]) : null,
+      highPrice: highIndex >= 0 ? asNumber(row[highIndex]) : null,
+      lowPrice: lowIndex >= 0 ? asNumber(row[lowIndex]) : null,
       closePrice: close,
       adjustedClosePrice: close,
       sourceCurrency,
@@ -206,20 +363,22 @@ async function fetchStooqHistory(asset: AssetForPricing, range: BackfillRange): 
     })
   }
 
-  if (rows.length === 0) throw new Error(`Brak historii Stooq dla ${symbol}. ${providerSymbolError()}`)
+  if (rows.length === 0) {
+    throw new Error(`Stooq CSV had no rows for ${symbol} between ${startDate ?? 'MAX'} and ${endDate}. Preview: ${responsePreview(csv)}`)
+  }
   return rows
 }
 
-async function fetchHistoricalRows(asset: AssetForPricing, range: BackfillRange) {
+async function fetchHistoricalRows(asset: AssetForPricing, range: BackfillRange, maxRows: number) {
   if (!asset.portfolio_id) throw new Error('Brak portfolio_id dla aktywa.')
-  return isCrypto(asset) ? fetchCoinGeckoHistory(asset, range) : fetchStooqHistory(asset, range)
+  return isCrypto(asset) ? fetchCryptoHistory(asset, range, maxRows) : fetchStooqHistory(asset, range)
 }
 
-function latestRows(rows: RawHistoricalPricePoint[]) {
-  if (rows.length <= MAX_ROWS_PER_ASSET_PER_REQUEST) return { rows, remainingRows: 0 }
+function latestRows(rows: RawHistoricalPricePoint[], maxRows: number) {
+  if (rows.length <= maxRows) return { rows, remainingRows: 0 }
   return {
-    rows: rows.slice(rows.length - MAX_ROWS_PER_ASSET_PER_REQUEST),
-    remainingRows: rows.length - MAX_ROWS_PER_ASSET_PER_REQUEST,
+    rows: rows.slice(rows.length - maxRows),
+    remainingRows: rows.length - maxRows,
   }
 }
 
@@ -379,7 +538,7 @@ async function persistBackfilledAsset(supabase: ServerSupabase, portfolioId: str
   return persistedRows
 }
 
-async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, asset: AssetForPricing, range: BackfillRange): Promise<BackfillAssetReport> {
+async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, asset: AssetForPricing, range: BackfillRange, maxRows: number): Promise<BackfillAssetReport> {
   const baseReport = {
     assetId: asset.id,
     symbol: asset.symbol,
@@ -388,8 +547,8 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
   }
 
   try {
-    const fetchedRows = await fetchHistoricalRows(asset, range)
-    const { rows: limitedRows, remainingRows } = latestRows(fetchedRows)
+    const fetchedRows = await fetchHistoricalRows(asset, range, maxRows)
+    const { rows: limitedRows, remainingRows } = latestRows(fetchedRows, maxRows)
     const withFx = await applyHistoricalFx(limitedRows)
     const persistedRows = await persistBackfilledAsset(supabase, portfolioId, withFx)
     const latestPriceDate = withFx[withFx.length - 1]?.priceDate ?? null
@@ -398,7 +557,7 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
     const sourceSymbol = withFx[0]?.sourceSymbol ?? (isCrypto(asset) ? resolveCoinGeckoId(asset) : normalizeStooqSymbol(asset))
     const status: BackfillAssetStatus = remainingRows > 0 ? 'partial' : persistedRows > 0 ? 'success' : 'skipped'
     const error = remainingRows > 0
-      ? `MAX/range returned more than ${MAX_ROWS_PER_ASSET_PER_REQUEST} rows; saved newest rows. Run a narrower range if you need older data.`
+      ? `MAX/range returned more than ${maxRows} rows; saved newest rows. Run a narrower range if you need older data.`
       : null
 
     await updateAssetBackfillStatus(supabase, asset.id, error)
@@ -493,9 +652,10 @@ export async function runHistoricalBackfill(options: {
   if (runError) throw new Error(`price_refresh_runs: ${runError.message}`)
   const runId = String(run.id)
   const results: BackfillAssetReport[] = []
+  const maxRowsPerAsset = options.scope === 'all_active' ? ALL_ACTIVE_MAX_ROWS_PER_ASSET : SELECTED_ASSET_MAX_ROWS_PER_REQUEST
 
   for (const asset of options.assets) {
-    const result = await backfillOneAsset(supabase, options.portfolioId, asset, options.range)
+    const result = await backfillOneAsset(supabase, options.portfolioId, asset, options.range, maxRowsPerAsset)
     results.push(result)
 
     const { error: itemError } = await supabase.from('price_refresh_run_items').insert({

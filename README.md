@@ -261,8 +261,8 @@ Zasady bezpieczeństwa:
 
 Providerzy:
 
-- Crypto: CoinGecko market chart range API, z mapowaniem m.in. BTC, ETH, XRP.
-- ETF/akcje: Stooq daily CSV, preferuje `assets.market_symbol`, a potem normalizuje `assets.symbol`.
+- Crypto: CoinGecko market chart range API dla zakresu 1Y; dla dłuższych publicznych zakresów używany jest bezpłatny fallback CryptoCompare, zapisywany pod stabilnym źródłem crypto, żeby nie dublować dziennych rekordów.
+- ETF/akcje: Stooq daily CSV, preferuje `assets.market_symbol`, a potem normalizuje `assets.symbol`. Jeśli Stooq wymaga klucza do CSV historycznego, ustaw server-side `STOOQ_API_KEY`.
 - FX: historyczne kursy NBP do PLN, zapisywane w `fx_rates`; jeśli kursu dla daty nie ma, `close_price_base` zostaje puste zamiast sztucznego przeliczenia.
 
 Daily cron `/api/cron/prices` pozostaje mechanizmem przyszłych dziennych aktualizacji. Backfill uzupełnia przeszłość w `market_prices`, a cron dopisuje kolejne dni.
@@ -276,6 +276,7 @@ NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...
 CRON_SECRET=...
+STOOQ_API_KEY=... # opcjonalnie, wymagane jeśli Stooq zwraca komunikat "Get your apikey" dla historii CSV
 ```
 
 2. Uruchom:
@@ -316,4 +317,67 @@ where run_id in (
   select id from price_refresh_runs where trigger_type = 'backfill' order by started_at desc limit 3
 )
 order by created_at desc;
+```
+
+
+## Stage C5.1b - Historical Price CSV Import
+
+C5.1b dodaje ręczny import CSV do `market_prices` bez zmiany schematu, crona ani manualnego refreshu. Import służy do uzupełnienia przeszłości, a `/api/cron/prices` nadal dopisuje przyszłe ceny.
+
+Endpoint:
+
+```text
+POST /api/prices/import-csv
+Authorization: Bearer <user access token>
+Content-Type: application/json
+```
+
+UI:
+
+```text
+Long-term -> Intelligence -> Backfill -> CSV import cen historycznych
+```
+
+Obsługiwane formaty nagłówków:
+
+```csv
+date,close
+2024-01-02,100.12
+2024-01-03,101.55
+```
+
+```csv
+Date,Open,High,Low,Close,Volume
+2024-01-02,99.50,101.00,98.75,100.12,123456
+```
+
+```csv
+Data;Otwarcie;Najwyższy;Najniższy;Zamknięcie;Wolumen
+02.01.2024;99,50;101,00;98,75;100,12;123456
+```
+
+Import:
+
+- obsługuje separator `,` albo `;`,
+- obsługuje kropkę i przecinek dziesiętny,
+- waliduje datę i `close_price`,
+- pokazuje preview i błędy per wiersz przed zapisem,
+- zapisuje maksymalnie 10 000 wierszy na import,
+- upsertuje w chunkach po 200,
+- zapisuje `close_price_base` tylko gdy waluta źródłowa jest taka sama jak waluta bazowa portfolio.
+
+### SQL verification po imporcie CSV
+
+```sql
+select asset_id, source, source_symbol, source_currency, base_currency, count(*) as rows, min(price_date), max(price_date)
+from market_prices
+where source in ('manual_csv', 'stooq_csv', 'yahoo_csv', 'other')
+group by asset_id, source, source_symbol, source_currency, base_currency
+order by max(price_date) desc;
+
+select price_date, close_price, close_price_base, source_currency, base_currency
+from market_prices
+where asset_id = '<asset_id>' and source = 'manual_csv'
+order by price_date desc
+limit 20;
 ```
