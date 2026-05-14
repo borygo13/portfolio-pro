@@ -261,8 +261,8 @@ Zasady bezpieczeństwa:
 
 Providerzy:
 
-- Crypto: CoinGecko market chart range API, z mapowaniem m.in. BTC, ETH, XRP.
-- ETF/akcje: Stooq daily CSV, preferuje `assets.market_symbol`, a potem normalizuje `assets.symbol`.
+- Crypto: CoinGecko market chart range API dla zakresu 1Y; dla dłuższych publicznych zakresów używany jest bezpłatny fallback CryptoCompare, zapisywany pod stabilnym źródłem crypto, żeby nie dublować dziennych rekordów.
+- ETF/akcje: Stooq daily CSV, preferuje `assets.market_symbol`, a potem normalizuje `assets.symbol`. Jeśli Stooq wymaga klucza do CSV historycznego, ustaw server-side `STOOQ_API_KEY`.
 - FX: historyczne kursy NBP do PLN, zapisywane w `fx_rates`; jeśli kursu dla daty nie ma, `close_price_base` zostaje puste zamiast sztucznego przeliczenia.
 
 Daily cron `/api/cron/prices` pozostaje mechanizmem przyszłych dziennych aktualizacji. Backfill uzupełnia przeszłość w `market_prices`, a cron dopisuje kolejne dni.
@@ -276,6 +276,7 @@ NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...
 CRON_SECRET=...
+STOOQ_API_KEY=... # opcjonalnie, wymagane jeśli Stooq zwraca komunikat "Get your apikey" dla historii CSV
 ```
 
 2. Uruchom:
