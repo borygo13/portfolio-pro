@@ -234,6 +234,7 @@ export default function PortfolioIntelligencePage() {
   const benchmarkComparison = useMemo(() => buildBenchmarkComparison(snapshots, benchmarkHistory), [snapshots, benchmarkHistory])
   const allocationDrift = useMemo(() => buildAllocationDrift(positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue), [positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue])
   const selectedBenchmark = assets.find((asset) => asset.id === benchmarkAssetId) ?? null
+  const latestSnapshotAllocation = snapshots[snapshots.length - 1]?.allocation_breakdown ?? []
 
   async function handleCashSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -494,14 +495,22 @@ export default function PortfolioIntelligencePage() {
             <AllocationDriftTable rows={allocationDrift} />
           </Card>
           <Card>
-            <h3 className="text-lg font-bold text-white">Snapshot readiness</h3>
-            <p className="mt-1 text-sm text-slate-500">Historia alokacji zacznie się wypełniać w nowych snapshotach po migracji C5.</p>
-            <div className="mt-5 space-y-3">
-              <InfoLine label="Snapshots" value={String(snapshots.length)} />
-              <InfoLine label="Latest contribution" value={PLN.format(num(snapshots[snapshots.length - 1]?.contribution))} />
-              <InfoLine label="Current cash" value={PLN.format(cashSummary.cashBalanceBase)} />
-              <InfoLine label="Active positions" value={String(activePositions.length)} />
-            </div>
+            <h3 className="text-lg font-bold text-white">Allocation history</h3>
+            <p className="mt-1 text-sm text-slate-500">Najnowszy `allocation_breakdown` z portfolio_snapshots. Starsze snapshoty sprzed C5 mogą być puste.</p>
+            {latestSnapshotAllocation.length > 0 ? (
+              <div className="mt-5 space-y-3">
+                {latestSnapshotAllocation.map((item) => (
+                  <InfoLine key={`${item.name}-${item.type}`} label={item.name} value={`${PCT.format(num(item.pct))} · ${PLN.format(num(item.value))}`} />
+                ))}
+              </div>
+            ) : (
+              <div className="mt-5 space-y-3">
+                <InfoLine label="Snapshots" value={String(snapshots.length)} />
+                <InfoLine label="Latest contribution" value={PLN.format(num(snapshots[snapshots.length - 1]?.contribution))} />
+                <InfoLine label="Current cash" value={PLN.format(cashSummary.cashBalanceBase)} />
+                <InfoLine label="Active positions" value={String(activePositions.length)} />
+              </div>
+            )}
           </Card>
         </div>
       ) : null}

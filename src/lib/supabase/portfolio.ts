@@ -177,16 +177,28 @@ export type PortfolioSnapshot = {
   id: string
   portfolio_id: string
   snapshot_date: string
+  base_currency?: string | null
   total_value: number
+  cash_value?: number | null
   invested_cost: number
+  remaining_cost?: number | null
+  realized_pnl?: number | null
+  unrealized_pnl?: number | null
+  total_pnl?: number | null
+  net_cash_flow?: number | null
   contribution: number
+  dividends_value?: number | null
+  fees_value?: number | null
+  taxes_value?: number | null
+  allocation_breakdown?: { name: string; type: string; value: number; pct: number }[] | null
+  benchmark_asset_id?: string | null
   calculated_at: string
 }
 
 export async function listPortfolioSnapshots(portfolioId: string): Promise<PortfolioSnapshot[]> {
   const { data, error } = await supabase
     .from('portfolio_snapshots')
-    .select('id,portfolio_id,snapshot_date,total_value,invested_cost,contribution,calculated_at')
+    .select('id,portfolio_id,snapshot_date,base_currency,total_value,cash_value,invested_cost,remaining_cost,realized_pnl,unrealized_pnl,total_pnl,net_cash_flow,contribution,dividends_value,fees_value,taxes_value,allocation_breakdown,benchmark_asset_id,calculated_at')
     .eq('portfolio_id', portfolioId)
     .order('snapshot_date', { ascending: true })
 
