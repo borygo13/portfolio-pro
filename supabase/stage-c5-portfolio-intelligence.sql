@@ -16,6 +16,20 @@ create table if not exists cash_ledger_entries (
   updated_at timestamptz not null default now()
 );
 
+-- Some existing C3/C4 databases may already contain one of these tables with
+-- a narrower shape. CREATE TABLE IF NOT EXISTS does not add missing columns, so
+-- keep the C5 shape compatible by repairing columns additively before indexes.
+alter table cash_ledger_entries
+  add column if not exists id uuid default uuid_generate_v4(),
+  add column if not exists portfolio_id uuid references portfolios(id) on delete cascade,
+  add column if not exists entry_type text check (entry_type in ('deposit','withdrawal','fee','tax','adjustment')),
+  add column if not exists amount numeric check (amount > 0),
+  add column if not exists currency text default 'PLN' check (currency in ('PLN','EUR','USD')),
+  add column if not exists entry_date date,
+  add column if not exists note text,
+  add column if not exists created_at timestamptz default now(),
+  add column if not exists updated_at timestamptz default now();
+
 create table if not exists dividends (
   id uuid primary key default uuid_generate_v4(),
   portfolio_id uuid not null references portfolios(id) on delete cascade,
@@ -30,12 +44,37 @@ create table if not exists dividends (
   updated_at timestamptz not null default now()
 );
 
+alter table dividends
+  add column if not exists id uuid default uuid_generate_v4(),
+  add column if not exists portfolio_id uuid references portfolios(id) on delete cascade,
+  add column if not exists asset_id uuid references assets(id) on delete cascade,
+  add column if not exists received_date date,
+  add column if not exists gross_amount numeric check (gross_amount >= 0),
+  add column if not exists tax_amount numeric default 0 check (tax_amount >= 0),
+  add column if not exists net_amount numeric check (net_amount >= 0),
+  add column if not exists currency text default 'PLN' check (currency in ('PLN','EUR','USD')),
+  add column if not exists note text,
+  add column if not exists created_at timestamptz default now(),
+  add column if not exists updated_at timestamptz default now();
+
+update dividends d
+set portfolio_id = a.portfolio_id
+from assets a
+where d.portfolio_id is null
+  and d.asset_id = a.id;
+
 create table if not exists portfolio_benchmarks (
   portfolio_id uuid primary key references portfolios(id) on delete cascade,
   benchmark_asset_id uuid references assets(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table portfolio_benchmarks
+  add column if not exists portfolio_id uuid references portfolios(id) on delete cascade,
+  add column if not exists benchmark_asset_id uuid references assets(id) on delete set null,
+  add column if not exists created_at timestamptz default now(),
+  add column if not exists updated_at timestamptz default now();
 
 alter table portfolio_snapshots
   add column if not exists dividends_value numeric not null default 0,
@@ -50,6 +89,8 @@ create index if not exists dividends_portfolio_date_idx
   on dividends(portfolio_id, received_date desc);
 create index if not exists dividends_asset_date_idx
   on dividends(asset_id, received_date desc);
+create unique index if not exists portfolio_benchmarks_portfolio_id_uidx
+  on portfolio_benchmarks(portfolio_id);
 create index if not exists portfolio_snapshots_benchmark_idx
   on portfolio_snapshots(portfolio_id, benchmark_asset_id, snapshot_date desc);
 
