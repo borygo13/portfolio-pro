@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent, InputHTMLAttributes, ReactNode } from 'react'
-import { Banknote, BarChart3, Landmark, Loader2, Percent, PieChart, Plus, Scale, Trash2, TrendingUp, Wallet } from 'lucide-react'
+import { Banknote, BarChart3, History, Landmark, Loader2, Percent, PieChart, Plus, Save, Scale, Trash2, TrendingUp, Wallet } from 'lucide-react'
 import { BenchmarkComparisonChart, MonthlyDividendChart, MonthlyReturnsChart } from '@/components/Charts'
 import { Card, PageHeader, Shell, StatCard, TrustBadge } from '@/components/Shell'
 import { projectEdoBond, summarizeEdoBonds } from '@/lib/bond-engine'
@@ -35,6 +35,7 @@ import {
   listMarketPriceHistory,
   listPortfolioSnapshots,
   listTransactions,
+  updateAssetMarketSymbol,
   upsertPortfolioBenchmark,
   type Asset,
   type AssetPrice,
@@ -50,7 +51,33 @@ import {
   type Transaction,
 } from '@/lib/supabase/portfolio'
 
-type TabId = 'overview' | 'cash' | 'dividends' | 'benchmark' | 'allocation'
+type TabId = 'overview' | 'cash' | 'dividends' | 'benchmark' | 'allocation' | 'backfill'
+type BackfillRange = '1Y' | '3Y' | '5Y' | 'MAX'
+type BackfillScope = 'asset' | 'all_active'
+
+type BackfillResult = {
+  ok: boolean
+  runId?: string
+  status: string
+  requestedAssets: number
+  processedAssets: number
+  remainingCount: number
+  remainingAssets?: { id: string; symbol: string; name?: string }[]
+  results?: {
+    assetId: string
+    symbol: string
+    provider: string
+    sourceSymbol: string
+    status: string
+    fetchedRows: number
+    persistedRows: number
+    remainingRows: number
+    fxMissingRows: number
+    latestPriceDate: string | null
+    error: string | null
+  }[]
+  error?: string
+}
 
 const tabs: { id: TabId; label: string }[] = [
   { id: 'overview', label: 'Overview' },
@@ -58,7 +85,21 @@ const tabs: { id: TabId; label: string }[] = [
   { id: 'dividends', label: 'Dividends' },
   { id: 'benchmark', label: 'Benchmark' },
   { id: 'allocation', label: 'Allocation' },
+  { id: 'backfill', label: 'Backfill' },
 ]
+
+const backfillRanges: BackfillRange[] = ['1Y', '3Y', '5Y', 'MAX']
+const cryptoIds: Record<string, string> = {
+  BTC: 'bitcoin',
+  XBT: 'bitcoin',
+  ETH: 'ethereum',
+  XRP: 'ripple',
+  SOL: 'solana',
+  ADA: 'cardano',
+  DOT: 'polkadot',
+  BNB: 'binancecoin',
+  DOGE: 'dogecoin',
+}
 
 const cashTypes: { value: CashLedgerEntryType; label: string }[] = [
   { value: 'deposit', label: 'Wpłata' },
@@ -94,6 +135,29 @@ function directionLabel(value: string) {
   return 'Trzymaj'
 }
 
+function cleanProviderSymbol(symbol: string) {
+  return symbol.trim().toLowerCase().replace(/^etr:/i, '').replace(/^xetra:/i, '').replace(/^nasdaq:/i, '').replace(/^nyse:/i, '')
+}
+
+function providerSymbolHint(asset: Asset | null, draft: string) {
+  if (!asset) return '—'
+  const configured = cleanProviderSymbol(draft || asset.market_symbol || '')
+  if (configured) return configured
+
+  const ticker = asset.symbol.trim().toUpperCase()
+  const type = (asset.asset_type ?? '').toLowerCase()
+  if (type.includes('crypto') || cryptoIds[ticker]) return cryptoIds[ticker] ?? ticker.toLowerCase()
+
+  const raw = cleanProviderSymbol(asset.symbol)
+  if (raw.includes('.')) return raw
+
+  const currency = (asset.currency ?? '').toUpperCase()
+  if (currency === 'EUR') return `${raw}.de`
+  if (currency === 'USD') return `${raw}.us`
+  if (currency === 'PLN') return `${raw}.pl`
+  return raw
+}
+
 export default function PortfolioIntelligencePage() {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
@@ -107,6 +171,12 @@ export default function PortfolioIntelligencePage() {
   const [benchmark, setBenchmark] = useState<PortfolioBenchmark | null>(null)
   const [benchmarkAssetId, setBenchmarkAssetId] = useState('')
   const [benchmarkHistory, setBenchmarkHistory] = useState<MarketPriceHistoryPoint[]>([])
+  const [backfillScope, setBackfillScope] = useState<BackfillScope>('asset')
+  const [backfillRange, setBackfillRange] = useState<BackfillRange>('1Y')
+  const [backfillAssetId, setBackfillAssetId] = useState('')
+  const [backfillLoading, setBackfillLoading] = useState(false)
+  const [backfillResult, setBackfillResult] = useState<BackfillResult | null>(null)
+  const [marketSymbolDrafts, setMarketSymbolDrafts] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -164,6 +234,10 @@ export default function PortfolioIntelligencePage() {
       setDividendRecords(dividendList)
       setBenchmark(benchmarkRow)
       setBenchmarkAssetId(benchmarkRow?.benchmark_asset_id ?? '')
+      setBackfillAssetId((current) => current && assetList.some((asset) => asset.id === current)
+        ? current
+        : assetList.find(isMarketPricedAsset)?.id ?? '')
+      setMarketSymbolDrafts(Object.fromEntries(assetList.map((asset) => [asset.id, asset.market_symbol ?? ''])))
       setCashForm((current) => ({ ...current, currency: baseCurrency }))
       setDividendForm((current) => ({
         ...current,
@@ -234,6 +308,8 @@ export default function PortfolioIntelligencePage() {
   const benchmarkComparison = useMemo(() => buildBenchmarkComparison(snapshots, benchmarkHistory), [snapshots, benchmarkHistory])
   const allocationDrift = useMemo(() => buildAllocationDrift(positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue), [positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue])
   const selectedBenchmark = assets.find((asset) => asset.id === benchmarkAssetId) ?? null
+  const selectedBackfillAsset = marketAssets.find((asset) => asset.id === backfillAssetId) ?? null
+  const selectedBackfillSymbol = providerSymbolHint(selectedBackfillAsset, selectedBackfillAsset ? marketSymbolDrafts[selectedBackfillAsset.id] ?? '' : '')
   const latestSnapshotAllocation = snapshots[snapshots.length - 1]?.allocation_breakdown ?? []
 
   async function handleCashSubmit(event: FormEvent<HTMLFormElement>) {
@@ -301,6 +377,62 @@ export default function PortfolioIntelligencePage() {
       setError(err?.message ?? 'Nie udało się zapisać benchmarku.')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleMarketSymbolSave(asset: Asset) {
+    setSaving(true)
+    setError(null)
+    try {
+      const updated = await updateAssetMarketSymbol(asset.id, marketSymbolDrafts[asset.id] ?? '')
+      setAssets((current) => current.map((item) => item.id === updated.id ? updated : item))
+      setMarketSymbolDrafts((current) => ({ ...current, [asset.id]: updated.market_symbol ?? '' }))
+    } catch (err: any) {
+      setError(err?.message ?? 'Nie udało się zapisać symbolu provider.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleBackfillSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!portfolio) return
+    if (backfillScope === 'asset' && !backfillAssetId) {
+      setError('Wybierz aktywo do backfillu.')
+      return
+    }
+
+    setBackfillLoading(true)
+    setBackfillResult(null)
+    setError(null)
+    try {
+      const { data } = await supabase.auth.getSession()
+      const token = data.session?.access_token
+      if (!token) throw new Error('Brak aktywnej sesji użytkownika.')
+
+      const response = await fetch('/api/prices/backfill', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          scope: backfillScope,
+          range: backfillRange,
+          portfolio_id: portfolio.id,
+          asset_id: backfillScope === 'asset' ? backfillAssetId : undefined,
+        }),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result?.error ?? 'Nie udało się wykonać backfillu.')
+
+      setBackfillResult(result as BackfillResult)
+      setPrices(await listAssetPrices(portfolio.id))
+      if (benchmarkAssetId) setBenchmarkHistory(await listMarketPriceHistory(portfolio.id, benchmarkAssetId, 'MAX'))
+    } catch (err: any) {
+      setError(err?.message ?? 'Nie udało się wykonać historical backfill.')
+    } finally {
+      setBackfillLoading(false)
     }
   }
 
@@ -488,6 +620,76 @@ export default function PortfolioIntelligencePage() {
         </div>
       ) : null}
 
+      {activeTab === 'backfill' ? (
+        <div className="grid gap-6 2xl:grid-cols-[.8fr_1.2fr]">
+          <Card>
+            <div className="flex items-start gap-3">
+              <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-cyan-500/10 text-cyan-200"><History size={20} /></div>
+              <div>
+                <h3 className="text-lg font-bold text-white">Historical backfill</h3>
+                <p className="mt-1 text-sm text-slate-500">Wybrane aktywo jest głównym trybem. Backfill wszystkich aktywnych instrumentów przetwarza maksymalnie 5 aktywów na request.</p>
+              </div>
+            </div>
+
+            <form onSubmit={handleBackfillSubmit} className="mt-5 space-y-3">
+              <div className="grid gap-3 md:grid-cols-2">
+                <Select value={backfillScope} onChange={(value) => setBackfillScope(value as BackfillScope)}>
+                  <option value="asset">Wybrane aktywo</option>
+                  <option value="all_active">Wszystkie aktywne · max 5</option>
+                </Select>
+                <Select value={backfillRange} onChange={(value) => setBackfillRange(value as BackfillRange)}>
+                  {backfillRanges.map((range) => <option key={range} value={range}>{range}</option>)}
+                </Select>
+              </div>
+
+              <Select value={backfillAssetId} onChange={setBackfillAssetId}>
+                {marketAssets.length === 0 ? <option value="">Brak aktywów rynkowych</option> : marketAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.symbol} · {asset.name}</option>)}
+              </Select>
+
+              {selectedBackfillAsset ? (
+                <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-white">Provider symbol</p>
+                      <p className="mt-1 text-xs text-slate-500">Używany do Stooq/CoinGecko. Symbol użytkownika pozostaje bez zmian.</p>
+                    </div>
+                    <span className="rounded-full bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-200">{selectedBackfillSymbol}</span>
+                  </div>
+                  <div className="flex flex-col gap-3 md:flex-row">
+                    <Input
+                      placeholder="np. iusq.de, aapl.us, bitcoin"
+                      value={marketSymbolDrafts[selectedBackfillAsset.id] ?? ''}
+                      onChange={(value) => setMarketSymbolDrafts((current) => ({ ...current, [selectedBackfillAsset.id]: value }))}
+                    />
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => handleMarketSymbolSave(selectedBackfillAsset)}
+                      className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white/10 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Save size={16} /> Zapisz
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              <SubmitButton disabled={backfillLoading || marketAssets.length === 0}>
+                {backfillLoading ? <Loader2 className="animate-spin" size={16} /> : <History size={16} />}
+                Uruchom backfill
+              </SubmitButton>
+            </form>
+
+            <p className="mt-4 text-xs leading-5 text-slate-500">Przykłady provider symbol: iusq.de, aapl.us, msft.us, BTC jako CoinGecko bitcoin. Przy błędnym symbolu API zwróci status per aktywo.</p>
+          </Card>
+
+          <Card>
+            <h3 className="text-lg font-bold text-white">Wynik backfillu</h3>
+            <p className="mt-1 text-sm text-slate-500">Raport pokazuje zapisane wiersze, braki FX oraz aktywa pozostałe do kolejnego requestu.</p>
+            <BackfillResultPanel result={backfillResult} loading={backfillLoading} />
+          </Card>
+        </div>
+      ) : null}
+
       {activeTab === 'allocation' ? (
         <div className="grid gap-6 2xl:grid-cols-[1.25fr_.75fr]">
           <Card>
@@ -627,6 +829,51 @@ function AllocationDriftTable({ rows }: { rows: ReturnType<typeof buildAllocatio
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+function BackfillResultPanel({ result, loading }: { result: BackfillResult | null; loading: boolean }) {
+  if (loading) return <div className="mt-5 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Backfill w toku...</div>
+  if (!result) return <EmptyState text="Uruchom backfill, żeby zobaczyć raport." />
+
+  return (
+    <div className="mt-5 space-y-4">
+      <div className="grid gap-3 md:grid-cols-4">
+        <InfoLine label="Status" value={result.status} />
+        <InfoLine label="Requested" value={String(result.requestedAssets)} />
+        <InfoLine label="Processed" value={String(result.processedAssets)} />
+        <InfoLine label="Remaining" value={String(result.remainingCount)} />
+      </div>
+
+      {result.error ? <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">{result.error}</div> : null}
+
+      <div className="space-y-3">
+        {(result.results ?? []).map((item) => (
+          <div key={item.assetId} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-semibold text-white">{item.symbol} · {item.sourceSymbol}</p>
+                <p className="mt-1 text-xs text-slate-500">{item.provider} · latest {item.latestPriceDate ?? '—'}</p>
+              </div>
+              <span className={`rounded-full px-3 py-1 text-xs font-semibold ${item.status === 'failed' ? 'bg-rose-500/10 text-rose-200' : item.status === 'partial' ? 'bg-amber-500/10 text-amber-100' : 'bg-emerald-500/10 text-emerald-200'}`}>{item.status}</span>
+            </div>
+            <div className="mt-4 grid gap-3 text-sm md:grid-cols-4">
+              <InfoLine label="Fetched" value={String(item.fetchedRows)} />
+              <InfoLine label="Saved" value={String(item.persistedRows)} />
+              <InfoLine label="Older rows" value={String(item.remainingRows)} />
+              <InfoLine label="FX missing" value={String(item.fxMissingRows)} />
+            </div>
+            {item.error ? <p className="mt-3 text-sm text-amber-100">{item.error}</p> : null}
+          </div>
+        ))}
+      </div>
+
+      {result.remainingAssets && result.remainingAssets.length > 0 ? (
+        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
+          Pozostałe aktywa do kolejnego requestu: {result.remainingAssets.map((asset) => asset.symbol).join(', ')}
+        </div>
+      ) : null}
     </div>
   )
 }

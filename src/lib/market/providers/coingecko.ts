@@ -1,6 +1,6 @@
 import type { AssetForPricing, MarketPriceResult } from '@/lib/market/types'
 
-const CRYPTO_IDS: Record<string, string> = {
+export const CRYPTO_IDS: Record<string, string> = {
   BTC: 'bitcoin',
   XBT: 'bitcoin',
   ETH: 'ethereum',
@@ -12,9 +12,14 @@ const CRYPTO_IDS: Record<string, string> = {
   DOGE: 'dogecoin',
 }
 
+export function resolveCoinGeckoId(asset: AssetForPricing) {
+  const ticker = asset.symbol.trim().toUpperCase()
+  return asset.market_symbol?.trim().toLowerCase() || CRYPTO_IDS[ticker] || ticker.toLowerCase()
+}
+
 export async function fetchCryptoPrice(asset: AssetForPricing): Promise<MarketPriceResult> {
   const ticker = asset.symbol.trim().toUpperCase()
-  const id = asset.market_symbol?.trim().toLowerCase() || CRYPTO_IDS[ticker] || ticker.toLowerCase()
+  const id = resolveCoinGeckoId(asset)
   const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(id)}&vs_currencies=pln`
   const res = await fetch(url, { cache: 'no-store' })
   if (!res.ok) throw new Error(`CoinGecko HTTP ${res.status}`)

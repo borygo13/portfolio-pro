@@ -10,6 +10,7 @@ import { supabase } from '@/lib/supabase/client'
 import {
   getLatestPriceRefreshRun,
   getDefaultPortfolio,
+  CHART_RANGES,
   listAssets,
   listAssetPrices,
   listEdoBonds,
@@ -18,6 +19,7 @@ import {
   listTransactions,
   type Asset,
   type AssetPrice,
+  type ChartRange,
   type EdoBond,
   type MarketPriceHistoryPoint,
   type Portfolio,
@@ -48,6 +50,15 @@ type PriceWarning = {
   asset: Asset
   reason: 'missing' | 'stale'
   lastPricedAt?: string | null
+}
+
+const chartRangeLabels: Record<ChartRange, string> = {
+  '30D': '30D',
+  '90D': '90D',
+  '1Y': '1Y',
+  '3Y': '3Y',
+  '5Y': '5Y',
+  MAX: 'MAX',
 }
 
 function n(value: unknown) {
@@ -138,12 +149,25 @@ function buildSnapshotEquityCurve(snapshots: PortfolioSnapshot[]) {
   return snapshots.map((snapshot) => {
     const contribution = n(snapshot.contribution) || n(snapshot.invested_cost)
     return {
+      date: snapshot.snapshot_date,
       month: snapshotLabel(snapshot.snapshot_date),
       portfolio: n(snapshot.total_value),
       contribution,
       benchmark: contribution,
     }
   })
+}
+
+function chartRangeStartDate(range: ChartRange) {
+  if (range === 'MAX') return null
+  const days = range === '30D' ? 30 : range === '90D' ? 90 : range === '1Y' ? 365 : range === '3Y' ? 365 * 3 : 365 * 5
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
+function filterByChartRange<T extends { date?: string }>(points: T[], range: ChartRange) {
+  const startDate = chartRangeStartDate(range)
+  if (!startDate) return points
+  return points.filter((point) => !point.date || point.date >= startDate)
 }
 
 function buildPriceWarnings(assets: Asset[], prices: AssetPrice[]): PriceWarning[] {
@@ -189,6 +213,8 @@ export default function Dashboard() {
   const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([])
   const [latestRefreshRun, setLatestRefreshRun] = useState<PriceRefreshRun | null>(null)
   const [selectedAssetId, setSelectedAssetId] = useState('')
+  const [portfolioRange, setPortfolioRange] = useState<ChartRange>('1Y')
+  const [assetHistoryRange, setAssetHistoryRange] = useState<ChartRange>('1Y')
   const [assetHistory, setAssetHistory] = useState<MarketPriceHistoryPoint[]>([])
   const [assetHistoryLoading, setAssetHistoryLoading] = useState(false)
   const [assetHistoryError, setAssetHistoryError] = useState<string | null>(null)
@@ -248,7 +274,7 @@ export default function Dashboard() {
   const rebalance = useMemo(() => buildRebalanceCandidates(positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue)[0] ?? null, [positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue])
   const snapshotEquityCurve = useMemo(() => buildSnapshotEquityCurve(snapshots), [snapshots])
   const fallbackEquityCurve = useMemo(() => buildSimpleEquityCurve(transactions, totalLongTermValue), [transactions, totalLongTermValue])
-  const equityCurve = snapshotEquityCurve.length > 0 ? snapshotEquityCurve : fallbackEquityCurve
+  const equityCurve = snapshotEquityCurve.length > 0 ? filterByChartRange(snapshotEquityCurve, portfolioRange) : fallbackEquityCurve
   const priceWarnings = useMemo(() => buildPriceWarnings(assets, prices), [assets, prices])
   const selectedAsset = useMemo(() => marketActivePositions.find((p) => p.asset.id === selectedAssetId)?.asset ?? null, [marketActivePositions, selectedAssetId])
   const assetHistoryCurve = useMemo(() => buildAssetHistoryCurve(assetHistory), [assetHistory])
@@ -274,7 +300,7 @@ export default function Dashboard() {
     setAssetHistoryLoading(true)
     setAssetHistoryError(null)
 
-    listMarketPriceHistory(portfolio.id, selectedAssetId)
+    listMarketPriceHistory(portfolio.id, selectedAssetId, assetHistoryRange)
       .then((history) => {
         if (!cancelled) setAssetHistory(history)
       })
@@ -289,7 +315,7 @@ export default function Dashboard() {
       })
 
     return () => { cancelled = true }
-  }, [portfolio?.id, selectedAssetId])
+  }, [portfolio?.id, selectedAssetId, assetHistoryRange])
 
   return (
     <Shell>
@@ -359,7 +385,11 @@ export default function Dashboard() {
               <p className="mt-1 text-sm text-slate-500">Krzywa używa dziennych snapshotów portfolio, a przy ich braku wraca do prostego modelu z transakcji.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <PillButton>1M</PillButton><PillButton>3M</PillButton><PillButton>YTD</PillButton><PillButton active>ALL</PillButton>
+              {CHART_RANGES.map((range) => (
+                <PillButton key={range} type="button" active={portfolioRange === range} onClick={() => setPortfolioRange(range)}>
+                  {chartRangeLabels[range]}
+                </PillButton>
+              ))}
             </div>
           </div>
           <div className="mb-4 flex flex-wrap gap-4 text-xs text-slate-400">
@@ -391,16 +421,25 @@ export default function Dashboard() {
             <h3 className="text-lg font-bold text-white">Historia aktywa</h3>
             <p className="mt-1 text-sm text-slate-500">Dzienna historia z `market_prices` dla wybranego aktywnego aktywa.</p>
           </div>
-          <select
-            className="min-w-[220px] rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm font-semibold text-white outline-none transition focus:border-cyan-300/60"
-            value={selectedAssetId}
-            onChange={(event) => setSelectedAssetId(event.target.value)}
-            disabled={marketActivePositions.length === 0}
-          >
-            {marketActivePositions.length === 0 ? <option value="">Brak aktywnych aktywów</option> : marketActivePositions.map((position) => (
-              <option key={position.asset.id} value={position.asset.id}>{position.asset.symbol} · {position.asset.name}</option>
-            ))}
-          </select>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="min-w-[220px] rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm font-semibold text-white outline-none transition focus:border-cyan-300/60"
+              value={selectedAssetId}
+              onChange={(event) => setSelectedAssetId(event.target.value)}
+              disabled={marketActivePositions.length === 0}
+            >
+              {marketActivePositions.length === 0 ? <option value="">Brak aktywnych aktywów</option> : marketActivePositions.map((position) => (
+                <option key={position.asset.id} value={position.asset.id}>{position.asset.symbol} · {position.asset.name}</option>
+              ))}
+            </select>
+            <div className="flex flex-wrap gap-2">
+              {CHART_RANGES.map((range) => (
+                <PillButton key={range} type="button" active={assetHistoryRange === range} onClick={() => setAssetHistoryRange(range)}>
+                  {chartRangeLabels[range]}
+                </PillButton>
+              ))}
+            </div>
+          </div>
         </div>
         {marketActivePositions.length === 0 ? (
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-sm text-slate-500">Brak aktywnych aktywów rynkowych do pokazania historii.</div>

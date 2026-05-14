@@ -214,3 +214,106 @@ limit 10;
 - Metryki performance są prostymi estymacjami z `portfolio_snapshots`, transakcji i ledgerów. Nie są jeszcze pełnym TWR/MWR.
 - Wielowalutowy cash ledger i dywidendy są zapisywane w PLN/EUR/USD, ale performance w walucie bazowej używa tylko rekordów w walucie portfolio. Przeliczanie FX dla cashflow zostaje na kolejny etap.
 - Historia alokacji korzysta z nowych snapshotów po wdrożeniu C5; starsze snapshoty nie mają `allocation_breakdown`.
+
+
+## Stage C5.1 - Historical Backfill Engine
+
+C5.1 nie dodaje migracji. Korzysta z tabel i pól wprowadzonych w C4.1: `market_prices`, `fx_rates`, `asset_prices`, `price_refresh_runs`, `price_refresh_run_items` oraz `assets.market_symbol`.
+
+Nowy endpoint:
+
+```text
+POST /api/prices/backfill
+Authorization: Bearer <user access token>
+Content-Type: application/json
+```
+
+Body dla jednego aktywa:
+
+```json
+{
+  "scope": "asset",
+  "portfolio_id": "<portfolio_id>",
+  "asset_id": "<asset_id>",
+  "range": "1Y"
+}
+```
+
+Body dla aktywnych aktywów:
+
+```json
+{
+  "scope": "all_active",
+  "portfolio_id": "<portfolio_id>",
+  "range": "3Y"
+}
+```
+
+Obsługiwane zakresy: `1Y`, `3Y`, `5Y`, `MAX`.
+
+Zasady bezpieczeństwa:
+
+- endpoint wymaga zalogowanego użytkownika i sprawdza dostęp przez Supabase RLS,
+- `SUPABASE_SERVICE_ROLE_KEY` jest używany wyłącznie server-side do zapisu historii,
+- tryb `all_active` przetwarza maksymalnie 5 aktywów na request i zwraca listę pozostałych aktywów,
+- upsert do `market_prices`/`fx_rates` jest chunkowany,
+- `MAX` jest best-effort; gdy provider zwróci zbyt dużo danych, API zapisuje najnowszy bezpieczny pakiet i raportuje `partial`.
+
+Providerzy:
+
+- Crypto: CoinGecko market chart range API, z mapowaniem m.in. BTC, ETH, XRP.
+- ETF/akcje: Stooq daily CSV, preferuje `assets.market_symbol`, a potem normalizuje `assets.symbol`.
+- FX: historyczne kursy NBP do PLN, zapisywane w `fx_rates`; jeśli kursu dla daty nie ma, `close_price_base` zostaje puste zamiast sztucznego przeliczenia.
+
+Daily cron `/api/cron/prices` pozostaje mechanizmem przyszłych dziennych aktualizacji. Backfill uzupełnia przeszłość w `market_prices`, a cron dopisuje kolejne dni.
+
+### Test backfillu w UI
+
+1. Ustaw env vars:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+SUPABASE_SERVICE_ROLE_KEY=...
+CRON_SECRET=...
+```
+
+2. Uruchom:
+
+```bash
+npm install
+npm run dev
+```
+
+3. Wejdź do `Long-term -> Intelligence -> Backfill`.
+4. Dla ETF/akcji ustaw `market_symbol`, np. `iusq.de`, `aapl.us`, `msft.us`. Dla BTC możesz użyć CoinGecko ID `bitcoin`.
+5. Uruchom `Backfill selected asset` dla IUSQ.DE oraz crypto BTC/ETH/XRP.
+6. Sprawdź raport per aktywo: status, zapisane wiersze, braki FX i ewentualne pozostałe rows/assets.
+7. Wejdź na Dashboard i przełącz zakresy wykresów `30D/90D/1Y/3Y/5Y/MAX`.
+
+### SQL verification
+
+```sql
+select asset_id, source_symbol, source, count(*) as rows, min(price_date), max(price_date)
+from market_prices
+group by asset_id, source_symbol, source
+order by rows desc;
+
+select from_currency, to_currency, count(*) as rows, min(rate_date), max(rate_date)
+from fx_rates
+group by from_currency, to_currency
+order by rows desc;
+
+select id, trigger_type, status, requested_assets, refreshed_assets, failed_assets, started_at, finished_at, error
+from price_refresh_runs
+where trigger_type = 'backfill'
+order by started_at desc
+limit 10;
+
+select symbol, source, status, price_date, error
+from price_refresh_run_items
+where run_id in (
+  select id from price_refresh_runs where trigger_type = 'backfill' order by started_at desc limit 3
+)
+order by created_at desc;
+```
