@@ -173,6 +173,27 @@ export async function listAssetPrices(portfolioId: string): Promise<AssetPrice[]
   return (data ?? []) as AssetPrice[]
 }
 
+export type PortfolioSnapshot = {
+  id: string
+  portfolio_id: string
+  snapshot_date: string
+  total_value: number
+  invested_cost: number
+  contribution: number
+  calculated_at: string
+}
+
+export async function listPortfolioSnapshots(portfolioId: string): Promise<PortfolioSnapshot[]> {
+  const { data, error } = await supabase
+    .from('portfolio_snapshots')
+    .select('id,portfolio_id,snapshot_date,total_value,invested_cost,contribution,calculated_at')
+    .eq('portfolio_id', portfolioId)
+    .order('snapshot_date', { ascending: true })
+
+  if (error) throw new Error(`Nie udało się pobrać historii portfolio: ${error.message}`)
+  return (data ?? []) as PortfolioSnapshot[]
+}
+
 export async function upsertAssetPrice(portfolioId: string, assetId: string, price: number, currency: string) {
   const payload = {
     portfolio_id: portfolioId,
