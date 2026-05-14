@@ -354,15 +354,22 @@ export async function listDividends(portfolioId: string): Promise<DividendRecord
 }
 
 export async function createDividend(portfolioId: string, input: CreateDividendInput): Promise<DividendRecord> {
-  const gross = Math.max(0, Number(input.gross_amount) || 0)
-  const tax = Math.max(0, Number(input.tax_amount) || 0)
+  const gross = Number(input.gross_amount)
+  const tax = Number(input.tax_amount)
+  const net = gross - tax
+
+  if (!input.asset_id) throw new Error('Wybierz aktywo dla dywidendy.')
+  if (!Number.isFinite(gross) || gross < 0) throw new Error('Kwota brutto dywidendy nie może być ujemna.')
+  if (!Number.isFinite(tax) || tax < 0) throw new Error('Podatek od dywidendy nie może być ujemny.')
+  if (!Number.isFinite(net) || net < 0) throw new Error('Kwota netto dywidendy nie może być ujemna.')
+
   const payload = {
     portfolio_id: portfolioId,
     asset_id: input.asset_id,
     received_date: input.received_date,
     gross_amount: gross,
     tax_amount: tax,
-    net_amount: Math.max(0, gross - tax),
+    net_amount: net,
     currency: input.currency,
     note: input.note?.trim() || null,
     updated_at: new Date().toISOString(),

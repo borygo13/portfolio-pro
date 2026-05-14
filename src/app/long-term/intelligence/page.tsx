@@ -266,8 +266,9 @@ export default function PortfolioIntelligencePage() {
     if (!portfolio) return
     const gross = Number(dividendForm.gross_amount)
     const tax = Number(dividendForm.tax_amount || 0)
-    if (!dividendForm.asset_id || !Number.isFinite(gross) || gross <= 0 || tax < 0) {
-      setError('Uzupełnij aktywo oraz dodatnią kwotę brutto dywidendy.')
+    const net = gross - tax
+    if (!dividendForm.asset_id || !Number.isFinite(gross) || gross < 0 || !Number.isFinite(tax) || tax < 0 || !Number.isFinite(net) || net < 0) {
+      setError('Uzupełnij aktywo oraz poprawne kwoty dywidendy: brutto, podatek i netto nie mogą być ujemne.')
       return
     }
 
