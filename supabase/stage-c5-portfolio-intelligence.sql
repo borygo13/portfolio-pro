@@ -57,6 +57,59 @@ alter table dividends
   add column if not exists created_at timestamptz default now(),
   add column if not exists updated_at timestamptz default now();
 
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'dividends'
+      and column_name = 'amount'
+  ) then
+    update dividends
+    set
+      gross_amount = coalesce(gross_amount, amount, 0),
+      tax_amount = coalesce(tax_amount, 0),
+      net_amount = coalesce(net_amount, greatest(coalesce(gross_amount, amount, 0) - coalesce(tax_amount, 0), 0))
+    where gross_amount is null
+      or tax_amount is null
+      or net_amount is null;
+
+    alter table dividends alter column amount drop not null;
+    alter table dividends alter column amount drop default;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.dividends'::regclass
+      and conname = 'dividends_gross_amount_nonnegative_chk'
+  ) then
+    alter table dividends
+      add constraint dividends_gross_amount_nonnegative_chk check (gross_amount >= 0) not valid;
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.dividends'::regclass
+      and conname = 'dividends_tax_amount_nonnegative_chk'
+  ) then
+    alter table dividends
+      add constraint dividends_tax_amount_nonnegative_chk check (tax_amount >= 0) not valid;
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.dividends'::regclass
+      and conname = 'dividends_net_amount_nonnegative_chk'
+  ) then
+    alter table dividends
+      add constraint dividends_net_amount_nonnegative_chk check (net_amount >= 0) not valid;
+  end if;
+end $$;
+
 update dividends d
 set portfolio_id = a.portfolio_id
 from assets a
