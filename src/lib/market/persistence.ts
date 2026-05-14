@@ -1,9 +1,18 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+ codex/analyze-portfolio-pro-repository-twrrob
+import { createPortfolioSnapshot } from './snapshots'
+import type { AssetForPricing, MarketPriceResult, RefreshRunSummary, RefreshTrigger } from './types'
+
+export type ServerSupabase = SupabaseClient<any, 'public', any>
+
+export function getServerSupabase(): ServerSupabase | null {
+
 import type { AssetForPricing, MarketPriceResult, RefreshRunSummary } from './types'
 
 type ServerSupabase = SupabaseClient<any, 'public', any>
 
 function getServerSupabase(): ServerSupabase | null {
+main
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
@@ -89,18 +98,34 @@ async function updateAssetRefreshStatus(supabase: ServerSupabase, result: Market
   if (error) throw new Error(`assets: ${error.message}`)
 }
 
+codex/analyze-portfolio-pro-repository-twrrob
+export async function persistRefresh(
+  assets: AssetForPricing[],
+  prices: MarketPriceResult[],
+  triggerType: RefreshTrigger,
+  options: { enabled?: boolean; createSnapshot?: boolean; snapshotSource?: string } = {},
+): Promise<RefreshRunSummary> {
+  if (options.enabled === false) return { persistenceError: 'Brak zweryfikowanej sesji użytkownika; ceny zwrócono bez zapisu historii.' }
+
 export async function persistManualRefresh(assets: AssetForPricing[], prices: MarketPriceResult[], enabled = true): Promise<RefreshRunSummary> {
   if (!enabled) return { persistenceError: 'Brak zweryfikowanej sesji użytkownika; ceny zwrócono bez zapisu historii.' }
+main
 
   const supabase = getServerSupabase()
   const portfolioId = portfolioIdFrom(assets, prices)
   if (!supabase || !portfolioId) return { persistenceError: 'Brak SUPABASE_SERVICE_ROLE_KEY albo portfolio_id; ceny zwrócono bez zapisu historii.' }
+
+codex/analyze-portfolio-pro-repository-twrrob
+  const { data: run, error: runError } = await supabase
+    .from('price_refresh_runs')
+    .insert({ portfolio_id: portfolioId, trigger_type: triggerType, status: 'running', requested_assets: assets.length })
 
   const requestedAssets = assets.length
   const initialStatus = 'running'
   const { data: run, error: runError } = await supabase
     .from('price_refresh_runs')
     .insert({ portfolio_id: portfolioId, trigger_type: 'manual', status: initialStatus, requested_assets: requestedAssets })
+main
     .select('id')
     .single()
 
@@ -162,5 +187,25 @@ export async function persistManualRefresh(assets: AssetForPricing[], prices: Ma
     .eq('id', runId)
 
   if (finishError && !persistenceError) persistenceError = `price_refresh_runs update: ${finishError.message}`
+codex/analyze-portfolio-pro-repository-twrrob
+
+  let snapshotWarning: string | undefined
+  let snapshotDate: string | undefined
+  if (options.createSnapshot !== false && refreshedAssets > 0) {
+    try {
+      const snapshot = await createPortfolioSnapshot(supabase, portfolioId, options.snapshotSource ?? triggerType)
+      snapshotDate = snapshot.snapshotDate
+    } catch (err: any) {
+      snapshotWarning = err?.message ?? 'Nie udało się utworzyć snapshotu portfolio.'
+    }
+  }
+
+  return { runId, persistenceError, snapshotWarning, snapshotDate }
+}
+
+export async function persistManualRefresh(assets: AssetForPricing[], prices: MarketPriceResult[], enabled = true): Promise<RefreshRunSummary> {
+  return persistRefresh(assets, prices, 'manual', { enabled, createSnapshot: true, snapshotSource: 'manual' })
+=======
   return { runId, persistenceError }
+main
 }
