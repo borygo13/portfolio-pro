@@ -64,6 +64,26 @@ export function EquityChart({ data }: { data: any[] }) {
   )
 }
 
+export function AssetHistoryChart({ data }: { data: { label: string; price: number }[] }) {
+  return (
+    <ResponsiveContainer width="100%" height={280}>
+      <AreaChart data={data} margin={{ top: 12, right: 8, left: -15, bottom: 0 }}>
+        <defs>
+          <linearGradient id="assetHistoryGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.4} />
+            <stop offset="95%" stopColor="#06b6d4" stopOpacity={0.03} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
+        <XAxis dataKey="label" stroke="#64748b" tickLine={false} axisLine={false} />
+        <YAxis stroke="#64748b" tickLine={false} axisLine={false} tickFormatter={(v) => Math.round(Number(v)).toLocaleString('pl-PL')} />
+        <Tooltip formatter={(v) => PLN.format(Number(v))} contentStyle={tooltip} />
+        <Area type="monotone" dataKey="price" name="Cena" stroke="#06b6d4" strokeWidth={3} fill="url(#assetHistoryGradient)" />
+      </AreaChart>
+    </ResponsiveContainer>
+  )
+}
+
 export function DividendChart({ data }: { data: any[] }) {
   return (
     <ResponsiveContainer width="100%" height={220}>

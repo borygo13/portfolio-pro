@@ -1,24 +1,28 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, Banknote, Database, Landmark, Loader2, ShieldCheck, Target, TrendingUp, Wallet, Zap } from 'lucide-react'
+import { Activity, AlertTriangle, Banknote, CheckCircle2, Database, Landmark, Loader2, RefreshCw, ShieldCheck, Target, TrendingUp, Wallet, Zap } from 'lucide-react'
 import { Shell, PageHeader, Card, StatCard, TrustBadge, PillButton } from '@/components/Shell'
-import { AllocationChart, DividendChart, EquityChart } from '@/components/Charts'
+import { AllocationChart, AssetHistoryChart, DividendChart, EquityChart } from '@/components/Charts'
 import { dividends, tradingStats } from '@/lib/demo-data'
 import { PLN, PCT } from '@/lib/format'
 import { supabase } from '@/lib/supabase/client'
 import {
+  getLatestPriceRefreshRun,
   getDefaultPortfolio,
   listAssets,
   listAssetPrices,
   listEdoBonds,
+  listMarketPriceHistory,
   listPortfolioSnapshots,
   listTransactions,
   type Asset,
   type AssetPrice,
   type EdoBond,
+  type MarketPriceHistoryPoint,
   type Portfolio,
   type PortfolioSnapshot,
+  type PriceRefreshRun,
   type Transaction,
 } from '@/lib/supabase/portfolio'
 import { buildPositions, buildSimpleEquityCurve, portfolioSummary, type Position } from '@/lib/position-engine'
@@ -38,6 +42,12 @@ type RebalanceCandidate = {
   targetPct: number
   diffPct: number
   suggestedAmount: number
+}
+
+type PriceWarning = {
+  asset: Asset
+  reason: 'missing' | 'stale'
+  lastPricedAt?: string | null
 }
 
 function n(value: unknown) {
@@ -106,6 +116,18 @@ function positionStatus(p: Position) {
   return 'Aktywna'
 }
 
+function isMarketPricedAsset(asset: Asset) {
+  const type = (asset.asset_type ?? '').toLowerCase()
+  return !type.includes('got') && !type.includes('oblig')
+}
+
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString('pl-PL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+}
+
 function snapshotLabel(snapshotDate: string) {
   const date = new Date(`${snapshotDate}T00:00:00`)
   if (Number.isNaN(date.getTime())) return snapshotDate
@@ -124,6 +146,40 @@ function buildSnapshotEquityCurve(snapshots: PortfolioSnapshot[]) {
   })
 }
 
+function buildPriceWarnings(assets: Asset[], prices: AssetPrice[]): PriceWarning[] {
+  const priceByAsset = new Map(prices.map((price) => [price.asset_id, price]))
+  const staleAfter = Date.now() - 24 * 60 * 60 * 1000
+  const warnings: PriceWarning[] = []
+
+  for (const asset of assets.filter(isMarketPricedAsset)) {
+    const latestPrice = priceByAsset.get(asset.id)
+    if (!latestPrice || n(latestPrice.price) <= 0) {
+      warnings.push({ asset, reason: 'missing' })
+      continue
+    }
+
+    const pricedAt = latestPrice.priced_at ?? latestPrice.updated_at ?? latestPrice.created_at
+    const pricedTime = pricedAt ? new Date(pricedAt).getTime() : NaN
+    if (Number.isNaN(pricedTime) || pricedTime < staleAfter) {
+      warnings.push({ asset, reason: 'stale', lastPricedAt: pricedAt })
+    }
+  }
+
+  return warnings
+}
+
+function buildAssetHistoryCurve(history: MarketPriceHistoryPoint[]) {
+  return history.map((point) => ({
+    label: snapshotLabel(point.price_date),
+    price: point.close_price_base == null ? n(point.close_price) : n(point.close_price_base),
+  }))
+}
+
+function refreshStatusLabel(status: PriceRefreshRun['status']) {
+  if (status === 'partial_success') return 'partial'
+  return status
+}
+
 export default function Dashboard() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
   const [assets, setAssets] = useState<Asset[]>([])
@@ -131,6 +187,11 @@ export default function Dashboard() {
   const [prices, setPrices] = useState<AssetPrice[]>([])
   const [edoBonds, setEdoBonds] = useState<EdoBond[]>([])
   const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([])
+  const [latestRefreshRun, setLatestRefreshRun] = useState<PriceRefreshRun | null>(null)
+  const [selectedAssetId, setSelectedAssetId] = useState('')
+  const [assetHistory, setAssetHistory] = useState<MarketPriceHistoryPoint[]>([])
+  const [assetHistoryLoading, setAssetHistoryLoading] = useState(false)
+  const [assetHistoryError, setAssetHistoryError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -141,12 +202,13 @@ export default function Dashboard() {
       const { data } = await supabase.auth.getUser()
       if (!data.user) throw new Error('Brak aktywnej sesji użytkownika.')
       const defaultPortfolio = await getDefaultPortfolio(data.user)
-      const [assetList, txList, priceList, bondList, snapshotList] = await Promise.all([
+      const [assetList, txList, priceList, bondList, snapshotList, refreshRun] = await Promise.all([
         listAssets(defaultPortfolio.id),
         listTransactions(defaultPortfolio.id),
         listAssetPrices(defaultPortfolio.id),
         listEdoBonds(defaultPortfolio.id),
         listPortfolioSnapshots(defaultPortfolio.id),
+        getLatestPriceRefreshRun(defaultPortfolio.id),
       ])
       setPortfolio(defaultPortfolio)
       setAssets(assetList)
@@ -154,6 +216,7 @@ export default function Dashboard() {
       setPrices(priceList)
       setEdoBonds(bondList)
       setSnapshots(snapshotList)
+      setLatestRefreshRun(refreshRun)
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się pobrać danych dashboardu.')
     } finally {
@@ -165,6 +228,7 @@ export default function Dashboard() {
 
   const positions = useMemo(() => buildPositions(assets, transactions, prices), [assets, transactions, prices])
   const activePositions = useMemo(() => positions.filter((p) => p.quantity > 0.00000001), [positions])
+  const marketActivePositions = useMemo(() => activePositions.filter((p) => isMarketPricedAsset(p.asset)), [activePositions])
   const watchlistPositions = useMemo(() => positions.filter((p) => p.quantity <= 0.00000001), [positions])
   const summary = useMemo(() => portfolioSummary(positions), [positions])
   const edoProjections = useMemo(() => edoBonds.map((bond) => projectEdoBond(bond)), [edoBonds])
@@ -185,8 +249,47 @@ export default function Dashboard() {
   const snapshotEquityCurve = useMemo(() => buildSnapshotEquityCurve(snapshots), [snapshots])
   const fallbackEquityCurve = useMemo(() => buildSimpleEquityCurve(transactions, totalLongTermValue), [transactions, totalLongTermValue])
   const equityCurve = snapshotEquityCurve.length > 0 ? snapshotEquityCurve : fallbackEquityCurve
+  const priceWarnings = useMemo(() => buildPriceWarnings(assets, prices), [assets, prices])
+  const selectedAsset = useMemo(() => marketActivePositions.find((p) => p.asset.id === selectedAssetId)?.asset ?? null, [marketActivePositions, selectedAssetId])
+  const assetHistoryCurve = useMemo(() => buildAssetHistoryCurve(assetHistory), [assetHistory])
   const dividendSum = dividends.reduce((s, d) => s + d.value, 0)
   const bondPnl = edoSummary.currentValueAfterTax - edoSummary.principal
+
+  useEffect(() => {
+    setSelectedAssetId((current) => {
+      if (current && marketActivePositions.some((position) => position.asset.id === current)) return current
+      return marketActivePositions[0]?.asset.id ?? ''
+    })
+  }, [marketActivePositions])
+
+  useEffect(() => {
+    if (!portfolio?.id || !selectedAssetId) {
+      setAssetHistory([])
+      setAssetHistoryError(null)
+      setAssetHistoryLoading(false)
+      return
+    }
+
+    let cancelled = false
+    setAssetHistoryLoading(true)
+    setAssetHistoryError(null)
+
+    listMarketPriceHistory(portfolio.id, selectedAssetId)
+      .then((history) => {
+        if (!cancelled) setAssetHistory(history)
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          setAssetHistory([])
+          setAssetHistoryError(err?.message ?? 'Nie udało się pobrać historii cen aktywa.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAssetHistoryLoading(false)
+      })
+
+    return () => { cancelled = true }
+  }, [portfolio?.id, selectedAssetId])
 
   return (
     <Shell>
@@ -200,6 +303,52 @@ export default function Dashboard() {
         <StatCard icon={Target} label="Wkład / koszt" value={PLN.format(totalLongTermCost)} sub={`${PLN.format(totalLongTermPnl)} P/L long-term`} tone={totalLongTermPnl >= 0 ? 'emerald' : 'red'} />
         <StatCard icon={Landmark} label="Obligacje EDO" value={PLN.format(edoSummary.currentValueAfterTax)} sub={`${PLN.format(bondPnl)} zysku po szac. podatku`} tone={bondPnl >= 0 ? 'emerald' : 'red'} />
         <StatCard icon={ShieldCheck} label="Portfolio" value={portfolio?.name ?? '—'} sub="Supabase live data" tone="violet" />
+      </div>
+
+      <div className="mt-6 grid gap-4 2xl:grid-cols-[.95fr_1.05fr]">
+        <Card>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-400"><RefreshCw size={16} /> Ostatni refresh cen</div>
+              <p className="mt-3 text-2xl font-bold text-white">{latestRefreshRun ? formatDateTime(latestRefreshRun.finished_at ?? latestRefreshRun.started_at) : 'Brak refreshu'}</p>
+              <p className="mt-2 text-sm text-slate-500">{latestRefreshRun ? `${latestRefreshRun.trigger_type} · ${refreshStatusLabel(latestRefreshRun.status)}` : 'Uruchom manualny refresh, żeby wypełnić historię cen.'}</p>
+            </div>
+            {latestRefreshRun ? (
+              <span className="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold text-slate-300">{latestRefreshRun.status}</span>
+            ) : null}
+          </div>
+          <div className="mt-5 grid grid-cols-3 gap-3 text-sm">
+            <div className="rounded-2xl bg-white/[0.04] p-3"><p className="text-xs text-slate-500">Żądane</p><p className="mt-1 font-bold text-white">{latestRefreshRun?.requested_assets ?? 0}</p></div>
+            <div className="rounded-2xl bg-emerald-500/10 p-3"><p className="text-xs text-emerald-200/70">Odświeżone</p><p className="mt-1 font-bold text-emerald-200">{latestRefreshRun?.refreshed_assets ?? 0}</p></div>
+            <div className="rounded-2xl bg-rose-500/10 p-3"><p className="text-xs text-rose-200/70">Błędy</p><p className="mt-1 font-bold text-rose-200">{latestRefreshRun?.failed_assets ?? 0}</p></div>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-400">
+                {priceWarnings.length > 0 ? <AlertTriangle size={16} className="text-amber-300" /> : <CheckCircle2 size={16} className="text-emerald-300" />}
+                Aktualność cen
+              </div>
+              <p className="mt-3 text-2xl font-bold text-white">{priceWarnings.length > 0 ? `${priceWarnings.length} do sprawdzenia` : 'Ceny aktualne'}</p>
+              <p className="mt-2 text-sm text-slate-500">Sprawdzamy aktywa rynkowe bez ceny albo z ceną starszą niż 24h.</p>
+            </div>
+          </div>
+          <div className="mt-5 space-y-2">
+            {priceWarnings.length === 0 ? (
+              <div className="rounded-2xl bg-emerald-500/10 p-3 text-sm text-emerald-100">Brak brakujących lub przestarzałych cen w aktywach rynkowych.</div>
+            ) : priceWarnings.slice(0, 5).map((warning) => (
+              <div key={`${warning.asset.id}-${warning.reason}`} className="flex items-center justify-between gap-3 rounded-2xl bg-amber-500/10 p-3 text-sm">
+                <div>
+                  <p className="font-semibold text-amber-100">{warning.asset.symbol}</p>
+                  <p className="text-xs text-amber-100/60">{warning.reason === 'missing' ? 'Brak latest price' : `Ostatnia cena: ${formatDateTime(warning.lastPricedAt)}`}</p>
+                </div>
+                <span className="rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-100">{warning.reason === 'missing' ? 'missing' : 'stale'}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
       </div>
 
       <div className="mt-6 grid gap-6 2xl:grid-cols-[1.45fr_.7fr]">
@@ -235,6 +384,36 @@ export default function Dashboard() {
           </div>
         </Card>
       </div>
+
+      <Card className="mt-6">
+        <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-white">Historia aktywa</h3>
+            <p className="mt-1 text-sm text-slate-500">Dzienna historia z `market_prices` dla wybranego aktywnego aktywa.</p>
+          </div>
+          <select
+            className="min-w-[220px] rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm font-semibold text-white outline-none transition focus:border-cyan-300/60"
+            value={selectedAssetId}
+            onChange={(event) => setSelectedAssetId(event.target.value)}
+            disabled={marketActivePositions.length === 0}
+          >
+            {marketActivePositions.length === 0 ? <option value="">Brak aktywnych aktywów</option> : marketActivePositions.map((position) => (
+              <option key={position.asset.id} value={position.asset.id}>{position.asset.symbol} · {position.asset.name}</option>
+            ))}
+          </select>
+        </div>
+        {marketActivePositions.length === 0 ? (
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-sm text-slate-500">Brak aktywnych aktywów rynkowych do pokazania historii.</div>
+        ) : assetHistoryLoading ? (
+          <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Ładowanie historii cen...</div>
+        ) : assetHistoryError ? (
+          <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-6 text-sm text-rose-100">{assetHistoryError}</div>
+        ) : assetHistoryCurve.length === 0 ? (
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-sm text-slate-500">{selectedAsset ? `Brak historii market_prices dla ${selectedAsset.symbol}.` : 'Brak historii cen.'}</div>
+        ) : (
+          <AssetHistoryChart data={assetHistoryCurve} />
+        )}
+      </Card>
 
       <div className="mt-6 grid gap-6 2xl:grid-cols-[.75fr_1.25fr]">
         <Card>
