@@ -1,8 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import type { FormEvent, InputHTMLAttributes, ReactNode } from 'react'
-import { Banknote, BarChart3, History, Landmark, Loader2, Percent, PieChart, Plus, Save, Scale, Trash2, TrendingUp, Wallet } from 'lucide-react'
+import type { ChangeEvent, FormEvent, InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from 'react'
+import { Banknote, BarChart3, FileUp, History, Landmark, Loader2, Percent, PieChart, Plus, Save, Scale, Trash2, TrendingUp, Wallet } from 'lucide-react'
 import { BenchmarkComparisonChart, MonthlyDividendChart, MonthlyReturnsChart } from '@/components/Charts'
 import { Card, PageHeader, Shell, StatCard, TrustBadge } from '@/components/Shell'
 import { projectEdoBond, summarizeEdoBonds } from '@/lib/bond-engine'
@@ -19,6 +19,12 @@ import {
   summarizeDividends,
 } from '@/lib/portfolio-intelligence'
 import { buildPositions, portfolioSummary } from '@/lib/position-engine'
+import {
+  CSV_IMPORT_SOURCE_LABELS,
+  parseHistoricalPriceCsv,
+  type CsvImportPreview,
+  type CsvImportSourceLabel,
+} from '@/lib/market/csv-import'
 import { supabase } from '@/lib/supabase/client'
 import {
   createCashLedgerEntry,
@@ -76,6 +82,17 @@ type BackfillResult = {
     latestPriceDate: string | null
     error: string | null
   }[]
+  error?: string
+}
+
+type CsvImportResult = {
+  ok: boolean
+  savedRows: number
+  source: CsvImportSourceLabel
+  sourceCurrency: SupportedCashCurrency
+  baseCurrency: SupportedCashCurrency
+  sourceSymbol: string
+  preview: CsvImportPreview
   error?: string
 }
 
@@ -177,6 +194,13 @@ export default function PortfolioIntelligencePage() {
   const [backfillLoading, setBackfillLoading] = useState(false)
   const [backfillResult, setBackfillResult] = useState<BackfillResult | null>(null)
   const [marketSymbolDrafts, setMarketSymbolDrafts] = useState<Record<string, string>>({})
+  const [csvImportAssetId, setCsvImportAssetId] = useState('')
+  const [csvImportSource, setCsvImportSource] = useState<CsvImportSourceLabel>('manual_csv')
+  const [csvImportCurrency, setCsvImportCurrency] = useState<SupportedCashCurrency>('PLN')
+  const [csvText, setCsvText] = useState('')
+  const [csvFileName, setCsvFileName] = useState('')
+  const [csvImportLoading, setCsvImportLoading] = useState(false)
+  const [csvImportResult, setCsvImportResult] = useState<CsvImportResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -237,8 +261,12 @@ export default function PortfolioIntelligencePage() {
       setBackfillAssetId((current) => current && assetList.some((asset) => asset.id === current)
         ? current
         : assetList.find(isMarketPricedAsset)?.id ?? '')
+      setCsvImportAssetId((current) => current && assetList.some((asset) => asset.id === current)
+        ? current
+        : assetList.find(isMarketPricedAsset)?.id ?? '')
       setMarketSymbolDrafts(Object.fromEntries(assetList.map((asset) => [asset.id, asset.market_symbol ?? ''])))
       setCashForm((current) => ({ ...current, currency: baseCurrency }))
+      setCsvImportCurrency(baseCurrency)
       setDividendForm((current) => ({
         ...current,
         currency: baseCurrency,
@@ -310,6 +338,8 @@ export default function PortfolioIntelligencePage() {
   const selectedBenchmark = assets.find((asset) => asset.id === benchmarkAssetId) ?? null
   const selectedBackfillAsset = marketAssets.find((asset) => asset.id === backfillAssetId) ?? null
   const selectedBackfillSymbol = providerSymbolHint(selectedBackfillAsset, selectedBackfillAsset ? marketSymbolDrafts[selectedBackfillAsset.id] ?? '' : '')
+  const selectedCsvImportAsset = marketAssets.find((asset) => asset.id === csvImportAssetId) ?? null
+  const csvPreview = useMemo(() => parseHistoricalPriceCsv(csvText), [csvText])
   const latestSnapshotAllocation = snapshots[snapshots.length - 1]?.allocation_breakdown ?? []
 
   async function handleCashSubmit(event: FormEvent<HTMLFormElement>) {
@@ -433,6 +463,64 @@ export default function PortfolioIntelligencePage() {
       setError(err?.message ?? 'Nie udało się wykonać historical backfill.')
     } finally {
       setBackfillLoading(false)
+    }
+  }
+
+  async function handleCsvFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    setCsvFileName(file.name)
+    setCsvImportResult(null)
+    try {
+      setCsvText(await file.text())
+    } catch (err: any) {
+      setError(err?.message ?? 'Nie udało się odczytać pliku CSV.')
+    }
+  }
+
+  async function handleCsvImportSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!portfolio) return
+    if (!csvImportAssetId) {
+      setError('Wybierz aktywo do importu CSV.')
+      return
+    }
+    if (csvPreview.validRows === 0) {
+      setError('CSV nie ma poprawnych wierszy do zapisania.')
+      return
+    }
+
+    setCsvImportLoading(true)
+    setCsvImportResult(null)
+    setError(null)
+    try {
+      const { data } = await supabase.auth.getSession()
+      const token = data.session?.access_token
+      if (!token) throw new Error('Brak aktywnej sesji użytkownika.')
+
+      const response = await fetch('/api/prices/import-csv', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          portfolio_id: portfolio.id,
+          asset_id: csvImportAssetId,
+          source: csvImportSource,
+          source_currency: csvImportCurrency,
+          csv: csvText,
+        }),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result?.error ?? 'Nie udało się zaimportować CSV.')
+
+      setCsvImportResult(result as CsvImportResult)
+      if (benchmarkAssetId === csvImportAssetId) setBenchmarkHistory(await listMarketPriceHistory(portfolio.id, benchmarkAssetId, 'MAX'))
+    } catch (err: any) {
+      setError(err?.message ?? 'Nie udało się zaimportować historii cen z CSV.')
+    } finally {
+      setCsvImportLoading(false)
     }
   }
 
@@ -621,8 +709,9 @@ export default function PortfolioIntelligencePage() {
       ) : null}
 
       {activeTab === 'backfill' ? (
-        <div className="grid gap-6 2xl:grid-cols-[.8fr_1.2fr]">
-          <Card>
+        <div className="space-y-6">
+          <div className="grid gap-6 2xl:grid-cols-[.8fr_1.2fr]">
+            <Card>
             <div className="flex items-start gap-3">
               <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-cyan-500/10 text-cyan-200"><History size={20} /></div>
               <div>
@@ -680,12 +769,58 @@ export default function PortfolioIntelligencePage() {
             </form>
 
             <p className="mt-4 text-xs leading-5 text-slate-500">Przykłady provider symbol: iusq.de, aapl.us, msft.us, BTC jako CoinGecko bitcoin. Przy błędnym symbolu API zwróci status per aktywo.</p>
-          </Card>
+            </Card>
+
+            <Card>
+              <h3 className="text-lg font-bold text-white">Wynik backfillu</h3>
+              <p className="mt-1 text-sm text-slate-500">Raport pokazuje zapisane wiersze, braki FX oraz aktywa pozostałe do kolejnego requestu.</p>
+              <BackfillResultPanel result={backfillResult} loading={backfillLoading} />
+            </Card>
+          </div>
 
           <Card>
-            <h3 className="text-lg font-bold text-white">Wynik backfillu</h3>
-            <p className="mt-1 text-sm text-slate-500">Raport pokazuje zapisane wiersze, braki FX oraz aktywa pozostałe do kolejnego requestu.</p>
-            <BackfillResultPanel result={backfillResult} loading={backfillLoading} />
+            <div className="mb-5 flex items-start gap-3">
+              <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-violet-500/10 text-violet-200"><FileUp size={20} /></div>
+              <div>
+                <h3 className="text-lg font-bold text-white">CSV import cen historycznych</h3>
+                <p className="mt-1 text-sm text-slate-500">Ręczny import uzupełnia `market_prices`; cron dalej dopisuje przyszłe ceny.</p>
+              </div>
+            </div>
+
+            <form onSubmit={handleCsvImportSubmit} className="grid gap-6 2xl:grid-cols-[.8fr_1.2fr]">
+              <div className="space-y-3">
+                <Select value={csvImportAssetId} onChange={setCsvImportAssetId}>
+                  {marketAssets.length === 0 ? <option value="">Brak aktywów rynkowych</option> : marketAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.symbol} · {asset.name}</option>)}
+                </Select>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Select value={csvImportCurrency} onChange={(value) => setCsvImportCurrency(value as SupportedCashCurrency)}>
+                    {currencies.map((currency) => <option key={currency} value={currency}>{currency}</option>)}
+                  </Select>
+                  <Select value={csvImportSource} onChange={(value) => setCsvImportSource(value as CsvImportSourceLabel)}>
+                    {CSV_IMPORT_SOURCE_LABELS.map((source) => <option key={source} value={source}>{source}</option>)}
+                  </Select>
+                </div>
+                <label className="block rounded-2xl border border-dashed border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400 transition hover:border-violet-300/50">
+                  <input type="file" accept=".csv,text/csv,text/plain" onChange={handleCsvFileChange} className="sr-only" />
+                  <span className="inline-flex items-center gap-2 font-semibold text-white"><FileUp size={16} /> {csvFileName || 'Wybierz plik CSV'}</span>
+                </label>
+                <Textarea
+                  rows={9}
+                  placeholder={'date,close\n2024-01-02,100.12\n2024-01-03,101.55'}
+                  value={csvText}
+                  onChange={(value) => {
+                    setCsvText(value)
+                    setCsvImportResult(null)
+                  }}
+                />
+                <SubmitButton disabled={csvImportLoading || !selectedCsvImportAsset || csvPreview.validRows === 0}>
+                  {csvImportLoading ? <Loader2 className="animate-spin" size={16} /> : <FileUp size={16} />}
+                  Potwierdź import
+                </SubmitButton>
+              </div>
+
+              <CsvImportPreviewPanel preview={csvPreview} result={csvImportResult} loading={csvImportLoading} />
+            </form>
           </Card>
         </div>
       ) : null}
@@ -727,6 +862,10 @@ function EmptyState({ text }: { text: string }) {
 
 function Input({ value, onChange, ...props }: { value: string; onChange: (value: string) => void } & Omit<InputHTMLAttributes<HTMLInputElement>, 'onChange'>) {
   return <input {...props} value={value} onChange={(event) => onChange(event.target.value)} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-violet-300/60" />
+}
+
+function Textarea({ value, onChange, ...props }: { value: string; onChange: (value: string) => void } & Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'onChange'>) {
+  return <textarea {...props} value={value} onChange={(event) => onChange(event.target.value)} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 font-mono text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-violet-300/60" />
 }
 
 function Select({ value, onChange, children }: { value: string; onChange: (value: string) => void; children: ReactNode }) {
@@ -872,6 +1011,68 @@ function BackfillResultPanel({ result, loading }: { result: BackfillResult | nul
       {result.remainingAssets && result.remainingAssets.length > 0 ? (
         <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
           Pozostałe aktywa do kolejnego requestu: {result.remainingAssets.map((asset) => asset.symbol).join(', ')}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function CsvImportPreviewPanel({ preview, result, loading }: { preview: CsvImportPreview; result: CsvImportResult | null; loading: boolean }) {
+  const sampleRows = preview.rows.slice(0, 6)
+  const sampleErrors = preview.errors.slice(0, 6)
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-4">
+        <InfoLine label="Parsed" value={String(preview.parsedRows)} />
+        <InfoLine label="Valid" value={String(preview.validRows)} />
+        <InfoLine label="Invalid" value={String(preview.invalidRows)} />
+        <InfoLine label="Skipped" value={String(preview.skippedRows)} />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        <InfoLine label="Delimiter" value={preview.delimiter} />
+        <InfoLine label="Min date" value={preview.minDate ?? '—'} />
+        <InfoLine label="Max date" value={preview.maxDate ?? '—'} />
+      </div>
+
+      {loading ? <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Import CSV w toku...</div> : null}
+      {result ? (
+        <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+          Zapisano/upsertowano {result.savedRows} wierszy dla źródła {result.source} · {result.sourceSymbol}.
+        </div>
+      ) : null}
+
+      {sampleRows.length > 0 ? (
+        <div className="overflow-hidden rounded-2xl border border-white/10">
+          <table className="w-full text-sm">
+            <thead className="bg-white/[0.04] text-slate-500">
+              <tr><th className="p-3 text-left">Date</th><th className="p-3 text-right">Open</th><th className="p-3 text-right">High</th><th className="p-3 text-right">Low</th><th className="p-3 text-right">Close</th></tr>
+            </thead>
+            <tbody>
+              {sampleRows.map((row) => (
+                <tr key={`${row.rowNumber}-${row.priceDate}`} className="border-t border-white/10 text-slate-300">
+                  <td className="p-3">{row.priceDate}</td>
+                  <td className="p-3 text-right">{row.openPrice ?? '—'}</td>
+                  <td className="p-3 text-right">{row.highPrice ?? '—'}</td>
+                  <td className="p-3 text-right">{row.lowPrice ?? '—'}</td>
+                  <td className="p-3 text-right font-semibold text-white">{row.closePrice}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : <EmptyState text="Wklej CSV, żeby zobaczyć preview." />}
+
+      {sampleErrors.length > 0 ? (
+        <div className="space-y-2">
+          {sampleErrors.map((error) => (
+            <div key={`${error.rowNumber}-${error.raw}`} className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-3 text-sm text-rose-100">
+              <p className="font-semibold">Row {error.rowNumber}</p>
+              <p className="mt-1 text-xs text-rose-100/70">{error.errors.join(' ')}</p>
+              <p className="mt-1 truncate font-mono text-xs text-rose-100/50">{error.raw}</p>
+            </div>
+          ))}
         </div>
       ) : null}
     </div>
