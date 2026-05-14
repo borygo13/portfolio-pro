@@ -157,7 +157,6 @@ export default function Dashboard() {
   const totalLongTermValue = summary.totalValue + edoSummary.currentValueAfterTax
   const totalLongTermCost = summary.remainingCost + edoSummary.principal
   const totalLongTermPnl = summary.totalPnl + (edoSummary.currentValueAfterTax - edoSummary.principal)
-  const totalWithTrading = totalLongTermValue + tradingStats.balance
   const allocation = useMemo(() => groupAllocation(positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue), [positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue])
   const rebalance = useMemo(() => buildRebalanceCandidates(positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue)[0] ?? null, [positions, edoSummary.currentValueAfterTax, bondsTarget, totalLongTermValue])
   const equityCurve = useMemo(() => buildSimpleEquityCurve(transactions, totalLongTermValue), [transactions, totalLongTermValue])
@@ -172,7 +171,7 @@ export default function Dashboard() {
       {loading ? <div className="mb-6 flex items-center gap-2 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Ładowanie danych z Supabase...</div> : null}
 
       <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard icon={Wallet} label="Całość majątku" value={PLN.format(totalWithTrading)} sub={`${activePositions.length} aktywnych pozycji + EDO + CFD demo`} />
+        <StatCard icon={Wallet} label="Całość majątku" value={PLN.format(totalLongTermValue)} sub={`${activePositions.length} aktywnych pozycji + EDO`} />
         <StatCard icon={Target} label="Wkład / koszt" value={PLN.format(totalLongTermCost)} sub={`${PLN.format(totalLongTermPnl)} P/L long-term`} tone={totalLongTermPnl >= 0 ? 'emerald' : 'red'} />
         <StatCard icon={Landmark} label="Obligacje EDO" value={PLN.format(edoSummary.currentValueAfterTax)} sub={`${PLN.format(bondPnl)} zysku po szac. podatku`} tone={bondPnl >= 0 ? 'emerald' : 'red'} />
         <StatCard icon={ShieldCheck} label="Portfolio" value={portfolio?.name ?? '—'} sub="Supabase live data" tone="violet" />
