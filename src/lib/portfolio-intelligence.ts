@@ -207,7 +207,7 @@ export function buildMonthlyDividendPoints(dividends: DividendRecord[], baseCurr
   const byMonth = new Map<string, MonthlyPoint>()
 
   for (const dividend of dividends.filter((item) => asSupportedCurrency(item.currency, base) === base)) {
-    const key = monthKey(dividend.received_date)
+    const key = monthKey(dividend.payment_date)
     const current = byMonth.get(key) ?? { month: monthLabel(key), gross: 0, tax: 0, net: 0 }
     current.gross += num(dividend.gross_amount)
     current.tax += num(dividend.tax_amount)

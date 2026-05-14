@@ -321,7 +321,7 @@ export type DividendRecord = {
   id: string
   portfolio_id: string
   asset_id: string
-  received_date: string
+  payment_date: string
   gross_amount: number
   tax_amount: number
   net_amount: number
@@ -334,7 +334,7 @@ export type DividendRecord = {
 
 export type CreateDividendInput = {
   asset_id: string
-  received_date: string
+  payment_date: string
   gross_amount: number
   tax_amount: number
   currency: SupportedCashCurrency
@@ -344,9 +344,9 @@ export type CreateDividendInput = {
 export async function listDividends(portfolioId: string): Promise<DividendRecord[]> {
   const { data, error } = await supabase
     .from('dividends')
-    .select('id,portfolio_id,asset_id,received_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at,assets(symbol,name,asset_type,currency)')
+    .select('id,portfolio_id,asset_id,payment_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at,assets(symbol,name,asset_type,currency)')
     .eq('portfolio_id', portfolioId)
-    .order('received_date', { ascending: false })
+    .order('payment_date', { ascending: false })
     .order('created_at', { ascending: false })
 
   if (error) throw new Error(`Nie udało się pobrać dywidend: ${error.message}`)
@@ -359,6 +359,7 @@ export async function createDividend(portfolioId: string, input: CreateDividendI
   const net = gross - tax
 
   if (!input.asset_id) throw new Error('Wybierz aktywo dla dywidendy.')
+  if (!input.payment_date) throw new Error('Wybierz datę płatności dywidendy.')
   if (!Number.isFinite(gross) || gross < 0) throw new Error('Kwota brutto dywidendy nie może być ujemna.')
   if (!Number.isFinite(tax) || tax < 0) throw new Error('Podatek od dywidendy nie może być ujemny.')
   if (!Number.isFinite(net) || net < 0) throw new Error('Kwota netto dywidendy nie może być ujemna.')
@@ -366,7 +367,7 @@ export async function createDividend(portfolioId: string, input: CreateDividendI
   const payload = {
     portfolio_id: portfolioId,
     asset_id: input.asset_id,
-    received_date: input.received_date,
+    payment_date: input.payment_date,
     gross_amount: gross,
     tax_amount: tax,
     net_amount: net,
@@ -378,7 +379,7 @@ export async function createDividend(portfolioId: string, input: CreateDividendI
   const { data, error } = await supabase
     .from('dividends')
     .insert(payload)
-    .select('id,portfolio_id,asset_id,received_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at,assets(symbol,name,asset_type,currency)')
+    .select('id,portfolio_id,asset_id,payment_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at,assets(symbol,name,asset_type,currency)')
     .single()
 
   if (error) throw new Error(`Nie udało się dodać dywidendy: ${error.message}`)

@@ -201,7 +201,7 @@ npm run dev
 
 ```sql
 select * from cash_ledger_entries order by entry_date desc limit 10;
-select * from dividends order by received_date desc limit 10;
+select * from dividends order by payment_date desc limit 10;
 select * from portfolio_benchmarks;
 select snapshot_date, contribution, cash_value, dividends_value, fees_value, taxes_value, allocation_breakdown
 from portfolio_snapshots
