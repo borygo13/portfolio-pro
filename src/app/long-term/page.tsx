@@ -195,9 +195,13 @@ export default function LongTermPage() {
     setSuccess(null)
     try {
       const pricedAssets = assets.filter((asset) => asset.asset_type !== 'Obligacje' && asset.asset_type !== 'Gotówka')
+      const { data: sessionData } = await supabase.auth.getSession()
       const response = await fetch('/api/prices/refresh', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionData.session?.access_token ? { Authorization: `Bearer ${sessionData.session.access_token}` } : {}),
+        },
         body: JSON.stringify({ assets: pricedAssets }),
       })
       const payload = await response.json()
