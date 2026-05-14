@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { BarChart3, Eye, EyeOff, KeyRound, Loader2, Mail, ShieldCheck } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
-import { ensureUserWorkspace } from '@/lib/supabase/bootstrap'
+import { ensureUserWorkspace, withSupabaseTimeout } from '@/lib/supabase/bootstrap'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -18,10 +18,28 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session?.user) router.replace('/dashboard')
-      else setCheckingSession(false)
-    })
+    let active = true
+
+    withSupabaseTimeout(
+      supabase.auth.getSession(),
+      'Sprawdzanie sesji Supabase trwa zbyt długo. Możesz spróbować zalogować się ponownie.',
+      8000,
+    )
+      .then(({ data, error: sessionError }) => {
+        if (!active) return
+        if (sessionError) throw sessionError
+        if (data.session?.user) router.replace('/dashboard')
+        else setCheckingSession(false)
+      })
+      .catch((err: any) => {
+        if (!active) return
+        setError(err?.message ?? 'Nie udało się sprawdzić sesji Supabase.')
+        setCheckingSession(false)
+      })
+
+    return () => {
+      active = false
+    }
   }, [router])
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
