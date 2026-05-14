@@ -1,6 +1,3 @@
-codex/analyze-portfolio-pro-repository-twrrob
-# Portfolio PRO - Stage C4.1a Market History Foundations
-=======
 codex/analyze-portfolio-pro-repository-7o2uwm
 # Portfolio PRO - Stage C4.1a Market History Foundations
 =======
@@ -8,7 +5,6 @@ codex/analyze-portfolio-pro-repository-7wms0h
 # Portfolio PRO - Stage C4.1a Market History Foundations
 =======
 # Portfolio PRO - Stage C3.4 Foundation Stabilization
-main
 main
 main
 
@@ -19,12 +15,6 @@ main
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
-codex/analyze-portfolio-pro-repository-twrrob
-SUPABASE_SERVICE_ROLE_KEY=... # wymagane dla C4.1b/C4.1c zapisów server-side
-CRON_SECRET=... # wymagane dla /api/cron/prices
-```
-
-=======
 codex/analyze-portfolio-pro-repository-7o2uwm
 SUPABASE_SERVICE_ROLE_KEY=... # wymagane dla C4.1b dual-write historii cen po stronie API
 ```
@@ -33,7 +23,6 @@ SUPABASE_SERVICE_ROLE_KEY=... # wymagane dla C4.1b dual-write historii cen po st
 ```
 
 codex/analyze-portfolio-pro-repository-7wms0h
-main
 main
 2. W Supabase SQL Editor uruchom aktualny schemat bazowy Stage C3.4, jeśli nie był jeszcze zastosowany:
 
@@ -50,8 +39,6 @@ supabase/stage-c4-1-market-history.sql
 `supabase/schema.sql` pozostaje kanonicznym snapshotem fundamentu C3.4. Starszy plik `supabase/stage-c3-price-engine.sql` jest oznaczony jako legacy i służy tylko projektom, które miały już wcześniejszą bazę C3 i potrzebowały samej tabeli `asset_prices`.
 
 4. Uruchom projekt:
-codex/analyze-portfolio-pro-repository-twrrob
-=======
 codex/analyze-portfolio-pro-repository-7o2uwm
 =======
 =======
@@ -64,7 +51,6 @@ supabase/stage-c3-4-foundation.sql
 `supabase/schema.sql` jest kanonicznym snapshotem tego samego schematu. Starszy plik `supabase/stage-c3-price-engine.sql` jest oznaczony jako legacy i służy tylko projektom, które miały już wcześniejszą bazę C3 i potrzebowały samej tabeli `asset_prices`.
 
 3. Uruchom projekt:
-main
 main
 main
 
@@ -80,12 +66,9 @@ http://localhost:3000
 ```
 
 ## Co robi Stage C3.4
-codex/analyze-portfolio-pro-repository-twrrob
-=======
 codex/analyze-portfolio-pro-repository-7o2uwm
 =======
 codex/analyze-portfolio-pro-repository-7wms0h
-main
 main
 
 - porządkuje schemat Supabase zgodnie z aktualnym kodem aplikacji,
@@ -137,10 +120,7 @@ select count(*) from market_prices where source = 'asset_prices_seed';
 ```
 
 Migracja nie usuwa ani nie modyfikuje istniejących rekordów `asset_prices`, więc obecne ekrany nadal korzystają z dotychczasowego latest-price modelu. Nowe tabele pozostają przygotowaniem pod kolejne etapy C4.1b/C4.1c.
-codex/analyze-portfolio-pro-repository-twrrob
-=======
 codex/analyze-portfolio-pro-repository-7o2uwm
-main
 
 
 ## Stage C4.1b - Manual Refresh Dual-Write
@@ -154,69 +134,6 @@ Manualny refresh cen nadal używa tego samego przycisku i endpointu `POST /api/p
 - wynik per aktywo do `price_refresh_run_items`.
 
 Do zapisu historii z API wymagany jest `SUPABASE_SERVICE_ROLE_KEY` ustawiony wyłącznie po stronie serwera. Bez niego endpoint nadal zwróci ceny dla obecnego UI, ale odpowiedź będzie zawierać `persistenceError`, a tabele historii/logów nie zostaną uzupełnione.
-codex/analyze-portfolio-pro-repository-twrrob
-
-
-## Stage C4.1c/C4.1d - Snapshots and Cron Refresh
-
-Po udanym manualnym albo cron refreshu aplikacja próbuje utworzyć dzienny wpis w `portfolio_snapshots`. Snapshot korzysta z aktualnych danych: `assets`, `transactions`, latest `asset_prices`, `edo_bonds` oraz istniejących silników `position-engine` i `bond-engine`. Jeśli zapis snapshotu się nie powiedzie, refresh cen nadal zwraca wynik, a odpowiedź zawiera `snapshotWarning`.
-
-Cron endpoint:
-
-```text
-GET /api/cron/prices
-Authorization: Bearer <CRON_SECRET>
-```
-
-Endpoint odświeża kwalifikujące się aktywa dla wszystkich portfeli, zapisuje `asset_prices`, `market_prices`, `fx_rates`, `price_refresh_runs`, `price_refresh_run_items` oraz tworzy dzienne snapshoty portfela. Endpoint zwraca `401 Unauthorized`, jeśli `CRON_SECRET` nie jest ustawiony albo token nie pasuje.
-
-### Test manualnego refreshu
-
-1. Ustaw `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` i `SUPABASE_SERVICE_ROLE_KEY`.
-2. Uruchom `npm run dev`.
-3. Zaloguj się, przejdź do `/long-term` i kliknij manualne odświeżenie cen.
-4. Sprawdź SQL:
-
-```sql
-select * from asset_prices order by updated_at desc limit 10;
-select * from market_prices order by fetched_at desc limit 10;
-select * from price_refresh_runs order by started_at desc limit 10;
-select * from price_refresh_run_items order by created_at desc limit 20;
-select * from portfolio_snapshots order by calculated_at desc limit 10;
-```
-
-### Test crona lokalnie
-
-1. Ustaw dodatkowo `CRON_SECRET`.
-2. Uruchom `npm run dev`.
-3. Wywołaj endpoint:
-
-```bash
-curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/prices
-```
-
-4. Sprawdź, że błędny sekret jest blokowany:
-
-```bash
-curl -i -H "Authorization: Bearer wrong" http://localhost:3000/api/cron/prices
-```
-
-5. Zweryfikuj SQL:
-
-```sql
-select status, trigger_type, requested_assets, refreshed_assets, failed_assets, started_at, finished_at
-from price_refresh_runs
-order by started_at desc
-limit 10;
-
-select portfolio_id, snapshot_date, total_value, positions_value, edo_value, source, calculated_at
-from portfolio_snapshots
-order by calculated_at desc
-limit 10;
-```
-
-`vercel.json` dodaje dzienny harmonogram dla `/api/cron/prices` o 21:30 UTC.
-=======
 =======
 =======
 
@@ -235,6 +152,5 @@ limit 10;
 - Legacy elementy z wcześniejszego szkicu schematu (`accounts`, `bonds_edo`, `tx_type`, `amount`, `fee`, `executed_at`, user-level `assets`) nie są częścią aktywnego schematu C3.4.
 - RLS opiera się o relację `portfolios.user_id = auth.uid()`.
 - Wstawianie transakcji z aplikacji przechodzi przez RPC `create_transaction_checked`, żeby walidacja oversell działała również na poziomie bazy.
-main
 main
 main
