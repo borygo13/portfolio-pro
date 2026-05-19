@@ -398,7 +398,7 @@ export default function Dashboard() {
             <span className="inline-flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-slate-400" />Wkład</span>
             <span className="inline-flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-cyan-400" />Benchmark placeholder</span>
           </div>
-          <EquityChart data={equityCurve} />
+          <EquityChart data={equityCurve} range={portfolioRange} />
         </Card>
 
         <Card>

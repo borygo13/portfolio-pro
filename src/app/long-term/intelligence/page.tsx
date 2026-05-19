@@ -255,6 +255,10 @@ function returnCardTone(value: number | null | undefined, available = value != n
   return value >= 0 ? 'emerald' : 'red'
 }
 
+function metricOrReason(value: number | null, reason: string | null | undefined) {
+  return value == null ? reason ?? 'Limited data' : formatPct(value)
+}
+
 export default function PortfolioIntelligencePage() {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
@@ -734,7 +738,7 @@ export default function PortfolioIntelligencePage() {
 
           <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
             <StatCard icon={Scale} label="MAX return" value={formatPct(maxPeriod?.returnPct ?? null)} sub={periodSub(maxPeriod)} tone={returnCardTone(maxPeriod?.returnPct, maxPeriod?.available)} />
-            <StatCard icon={TrendingDown} label="Max drawdown" value={formatPct(performance.maxDrawdownPct)} sub={performance.maxDrawdownDate ? formatDate(performance.maxDrawdownDate) : 'need history'} tone="red" />
+            <StatCard icon={TrendingDown} label="Max drawdown" value={formatPct(performance.maxDrawdownPct)} sub={performance.maxDrawdownDate ? formatDate(performance.maxDrawdownDate) : performance.maxDrawdownReason ?? 'limited data'} tone={performance.maxDrawdownPct == null ? 'cyan' : 'red'} />
             <StatCard icon={TrendingUp} label="Best month" value={formatPct(performance.bestMonth?.returnPct ?? null)} sub={monthSub(performance.bestMonth)} tone="emerald" />
             <StatCard icon={TrendingDown} label="Worst month" value={formatPct(performance.worstMonth?.returnPct ?? null)} sub={monthSub(performance.worstMonth)} tone="red" />
           </div>
@@ -744,7 +748,7 @@ export default function PortfolioIntelligencePage() {
               <div className="mb-5 flex items-center justify-between gap-4">
                 <div>
                   <h3 className="text-lg font-bold text-white">Monthly returns</h3>
-                  <p className="mt-1 text-sm text-slate-500">Snapshot-based estimated monthly returns, grouped by year and adjusted for contribution changes.</p>
+                  <p className="mt-1 text-sm text-slate-500">Snapshot-based estimated monthly returns. Months that fail sparse-history or cash-flow guards stay unavailable.</p>
                 </div>
                 <TrustBadge>Estimated</TrustBadge>
               </div>
@@ -1333,7 +1337,7 @@ function PerformanceEngineSummary({
 }) {
   return (
     <div className="mt-5 grid gap-3 md:grid-cols-2">
-      <InfoLine label="Volatility est." value={formatPct(performance.volatilityPct)} />
+      <InfoLine label="Volatility est." value={metricOrReason(performance.volatilityPct, performance.volatilityReason)} />
       <InfoLine label="Snapshots" value={String(performance.snapshots.length)} />
       <InfoLine label="Realized P/L" value={PLN.format(realizedPnl)} />
       <InfoLine label="Unrealized P/L" value={PLN.format(unrealizedPnl)} />

@@ -80,10 +80,13 @@ export function AllocationChart({ data, total }: { data: { name: string; value: 
   )
 }
 
-export function EquityChart({ data }: { data: any[] }) {
+export function EquityChart({ data, range = 'MAX' }: { data: ({ date?: string; month?: string; portfolio: number; contribution: number; benchmark?: number })[]; range?: ChartRange }) {
+  const chartData = data.map((item) => ({ ...item, date: item.date ?? item.month ?? '' }))
+  const axisRange = effectiveAxisRange(chartData, range)
+
   return (
     <ResponsiveContainer width="100%" height={310}>
-      <AreaChart data={data} margin={{ top: 12, right: 8, left: -15, bottom: 0 }}>
+      <AreaChart data={chartData} margin={{ top: 12, right: 8, left: -15, bottom: 0 }}>
         <defs>
           <linearGradient id="portfolioGradient" x1="0" y1="0" x2="0" y2="1">
             <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.45} />
@@ -91,9 +94,9 @@ export function EquityChart({ data }: { data: any[] }) {
           </linearGradient>
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
-        <XAxis dataKey="month" stroke="#64748b" tickLine={false} axisLine={false} />
+        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#64748b" tickLine={false} axisLine={false} minTickGap={28} />
         <YAxis stroke="#64748b" tickLine={false} axisLine={false} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
-        <Tooltip formatter={(v) => PLN.format(Number(v))} contentStyle={tooltip} />
+        <Tooltip formatter={(v) => PLN.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
         <Area type="monotone" dataKey="portfolio" name="Portfel" stroke="#8b5cf6" strokeWidth={3} fill="url(#portfolioGradient)" />
         <Line type="monotone" dataKey="contribution" name="Wkład" stroke="#94a3b8" strokeWidth={2} dot={false} strokeDasharray="5 5" />
         <Line type="monotone" dataKey="benchmark" name="Benchmark" stroke="#06b6d4" strokeWidth={2} dot={false} />
