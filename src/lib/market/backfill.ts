@@ -1,6 +1,7 @@
 import { resolveCoinGeckoId } from '@/lib/market/providers/coingecko'
 import { getNbpHistoricalRatesToPln } from '@/lib/market/providers/nbp'
 import { normalizeStooqSymbol } from '@/lib/market/providers/stooq'
+import { PROVIDER_CAPABILITIES, providerFallbackOrderForAsset, type MarketProviderId } from '@/lib/market/provider-diagnostics'
 import { getServerSupabase, type ServerSupabase } from '@/lib/market/persistence'
 import type { AssetForPricing, FxRateResult } from '@/lib/market/types'
 
@@ -17,7 +18,7 @@ const FX_RANGE_CHUNK_DAYS = 90
 const CRYPTOCOMPARE_CHUNK_LIMIT = 2000
 const DAY_MS = 24 * 60 * 60 * 1000
 
-type HistoricalSource = 'coingecko' | 'cryptocompare' | 'stooq'
+type HistoricalSource = Extract<MarketProviderId, 'coingecko' | 'cryptocompare' | 'eodhd' | 'stooq'>
 
 type HistoricalPricePoint = {
   assetId: string
@@ -42,11 +43,17 @@ type HistoricalPricePoint = {
 
 type RawHistoricalPricePoint = Omit<HistoricalPricePoint, 'fxRateToBase' | 'closePriceBase' | 'fxRate'>
 
+type HistoricalFetchResult = {
+  rows: RawHistoricalPricePoint[]
+  providerFallbackChain: MarketProviderId[]
+  providerMessages: string[]
+}
+
 export type BackfillAssetReport = {
   assetId: string
   symbol: string
   name?: string
-  provider: HistoricalSource
+  provider: MarketProviderId
   sourceSymbol: string
   range: BackfillRange
   status: BackfillAssetStatus
@@ -56,6 +63,9 @@ export type BackfillAssetReport = {
   fxMissingRows: number
   latestPriceDate: string | null
   error: string | null
+  providerFallbackChain: MarketProviderId[]
+  providerMessages: string[]
+  adjustedPriceRows: number
 }
 
 export type BackfillReport = {
@@ -113,8 +123,12 @@ function stooqSource(symbol: string, currency: string) {
   return `Stooq ${symbol}${currency !== 'PLN' ? ` + NBP ${currency}/PLN` : ''}`
 }
 
+function eodhdSource(symbol: string, currency: string) {
+  return `EODHD ${symbol}${currency !== 'PLN' ? ` + NBP ${currency}/PLN` : ''}`
+}
+
 function providerSymbolError() {
-  return 'Sprawdź market_symbol. Przykłady: iusq.de, aapl.us, msft.us, btc via CoinGecko bitcoin.'
+  return 'Sprawdź market_symbol. Przykłady: IUSQ.DE, 500.PA, CSPX.L, AAPL.US, BTC via CoinGecko bitcoin.'
 }
 
 function responsePreview(text: string) {
@@ -132,6 +146,24 @@ function cryptoCompareSymbol(asset: AssetForPricing) {
   const ticker = asset.symbol.trim().toUpperCase()
   if (ticker === 'XBT') return 'BTC'
   return ticker
+}
+
+function normalizeEodhdSymbol(value: string) {
+  return value.trim().replace(/^etr:/i, '').replace(/^xetra:/i, '').replace(/^nasdaq:/i, '').replace(/^nyse:/i, '').toUpperCase()
+}
+
+function eodhdSymbolCandidates(asset: AssetForPricing) {
+  const configured = normalizeEodhdSymbol(asset.market_symbol || asset.symbol)
+  const candidates = [configured]
+  if (configured.endsWith('.DE')) candidates.push(configured.replace(/\.DE$/, '.XETRA'), configured.replace(/\.DE$/, '.F'))
+  if (configured.endsWith('.L')) candidates.push(configured.replace(/\.L$/, '.LSE'))
+  if (!configured.includes('.')) {
+    const currency = (asset.currency ?? '').toUpperCase()
+    if (currency === 'USD') candidates.push(`${configured}.US`)
+    if (currency === 'EUR') candidates.push(`${configured}.XETRA`, `${configured}.PA`)
+    if (currency === 'GBP') candidates.push(`${configured}.LSE`)
+  }
+  return Array.from(new Set(candidates.filter(Boolean)))
 }
 
 function mapCryptoPoint(
@@ -298,6 +330,95 @@ async function fetchCryptoHistory(asset: AssetForPricing, range: BackfillRange, 
   return fetchCryptoCompareHistory(asset, range, maxRows)
 }
 
+function mapEodhdRow(asset: AssetForPricing, sourceSymbol: string, sourceCurrency: string, row: any, fetchedAt: string): RawHistoricalPricePoint | null {
+  const priceDate = typeof row?.date === 'string' ? row.date.slice(0, 10) : ''
+  const close = asNumber(row?.close)
+  if (!priceDate || !close || close <= 0) return null
+
+  const adjustedClose = asNumber(row?.adjusted_close ?? row?.adjustedClose ?? row?.adjusted)
+  return {
+    assetId: asset.id,
+    portfolioId: String(asset.portfolio_id),
+    symbol: asset.symbol,
+    source: eodhdSource(sourceSymbol, sourceCurrency),
+    sourceSymbol,
+    provider: 'eodhd',
+    priceDate,
+    openPrice: asNumber(row?.open),
+    highPrice: asNumber(row?.high),
+    lowPrice: asNumber(row?.low),
+    closePrice: close,
+    adjustedClosePrice: adjustedClose && adjustedClose > 0 ? adjustedClose : close,
+    sourceCurrency,
+    baseCurrency: 'PLN',
+    fetchedAt,
+  }
+}
+
+async function fetchEodhdHistoryForSymbol(asset: AssetForPricing, symbol: string, range: BackfillRange): Promise<RawHistoricalPricePoint[]> {
+  const apiKey = process.env.EODHD_API_KEY?.trim()
+  if (!apiKey) throw new Error('EODHD_API_KEY is not configured.')
+
+  const sourceCurrency = (asset.currency ?? 'PLN').toUpperCase()
+  const { startDate, endDate } = rangeWindow(range)
+  const url = new URL(`https://eodhd.com/api/eod/${encodeURIComponent(symbol)}`)
+  url.searchParams.set('api_token', apiKey)
+  url.searchParams.set('fmt', 'json')
+  url.searchParams.set('period', 'd')
+  url.searchParams.set('order', 'a')
+  if (startDate) url.searchParams.set('from', startDate)
+  url.searchParams.set('to', endDate)
+
+  let res: Response
+  try {
+    res = await fetch(url, { cache: 'no-store', headers: backfillHeaders() })
+  } catch (err: any) {
+    throw new Error(`EODHD request failed for ${symbol}: ${err?.message ?? 'fetch failed'}`)
+  }
+
+  const text = await res.text()
+  if (!res.ok) {
+    const limit = res.status === 429 ? ' Rate limit reached.' : ''
+    throw new Error(`EODHD returned HTTP ${res.status} for ${symbol}.${limit} Preview: ${responsePreview(text)}`)
+  }
+
+  let json: any
+  try {
+    json = JSON.parse(text)
+  } catch {
+    throw new Error(`EODHD returned invalid JSON for ${symbol}. Preview: ${responsePreview(text)}`)
+  }
+
+  if (!Array.isArray(json)) {
+    const message = typeof json?.message === 'string' ? json.message : typeof json?.error === 'string' ? json.error : responsePreview(text)
+    throw new Error(`EODHD returned no historical array for ${symbol}. ${message}`)
+  }
+
+  const fetchedAt = new Date().toISOString()
+  const byDate = new Map<string, RawHistoricalPricePoint>()
+  for (const item of json) {
+    const mapped = mapEodhdRow(asset, symbol, sourceCurrency, item, fetchedAt)
+    if (mapped) byDate.set(mapped.priceDate, mapped)
+  }
+
+  const rows = Array.from(byDate.values()).sort((a, b) => a.priceDate.localeCompare(b.priceDate))
+  if (rows.length === 0) throw new Error(`EODHD returned no usable prices for ${symbol} ${range}. ${providerSymbolError()}`)
+  return rows
+}
+
+async function fetchEodhdHistory(asset: AssetForPricing, range: BackfillRange): Promise<RawHistoricalPricePoint[]> {
+  const errors: string[] = []
+  for (const candidate of eodhdSymbolCandidates(asset)) {
+    try {
+      return await fetchEodhdHistoryForSymbol(asset, candidate, range)
+    } catch (err: any) {
+      errors.push(`${candidate}: ${err?.message ?? 'failed'}`)
+    }
+  }
+
+  throw new Error(errors.join(' | ') || `EODHD failed for ${asset.symbol}. ${providerSymbolError()}`)
+}
+
 async function fetchStooqHistory(asset: AssetForPricing, range: BackfillRange): Promise<RawHistoricalPricePoint[]> {
   const symbol = normalizeStooqSymbol(asset)
   const sourceCurrency = (asset.currency ?? 'PLN').toUpperCase()
@@ -369,9 +490,38 @@ async function fetchStooqHistory(asset: AssetForPricing, range: BackfillRange): 
   return rows
 }
 
-async function fetchHistoricalRows(asset: AssetForPricing, range: BackfillRange, maxRows: number) {
+async function fetchEquityHistory(asset: AssetForPricing, range: BackfillRange): Promise<HistoricalFetchResult> {
+  const fallbackChain = providerFallbackOrderForAsset(asset)
+  const chain = fallbackChain.filter((provider): provider is HistoricalSource => provider === 'eodhd' || provider === 'stooq')
+  const providerMessages: string[] = []
+  if (chain.length === 0) {
+    throw new Error(`Asset is configured for ${fallbackChain.join(' -> ')}. Use CSV import as the manual historical fallback.`)
+  }
+
+  for (const provider of chain) {
+    try {
+      const rows = provider === 'eodhd' ? await fetchEodhdHistory(asset, range) : await fetchStooqHistory(asset, range)
+      if (providerMessages.length > 0) providerMessages.push(`Using ${PROVIDER_CAPABILITIES[provider].label} after fallback.`)
+      return { rows, providerFallbackChain: fallbackChain, providerMessages }
+    } catch (err: any) {
+      providerMessages.push(`${PROVIDER_CAPABILITIES[provider].label}: ${err?.message ?? 'failed'}`)
+    }
+  }
+
+  throw new Error(`Provider fallback failed. ${providerMessages.join(' | ')} Use CSV import as manual fallback.`)
+}
+
+async function fetchHistoricalRows(asset: AssetForPricing, range: BackfillRange, maxRows: number): Promise<HistoricalFetchResult> {
   if (!asset.portfolio_id) throw new Error('Brak portfolio_id dla aktywa.')
-  return isCrypto(asset) ? fetchCryptoHistory(asset, range, maxRows) : fetchStooqHistory(asset, range)
+  if (isCrypto(asset)) {
+    return {
+      rows: await fetchCryptoHistory(asset, range, maxRows),
+      providerFallbackChain: providerFallbackOrderForAsset(asset),
+      providerMessages: [],
+    }
+  }
+
+  return fetchEquityHistory(asset, range)
 }
 
 function latestRows(rows: RawHistoricalPricePoint[], maxRows: number) {
@@ -547,14 +697,15 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
   }
 
   try {
-    const fetchedRows = await fetchHistoricalRows(asset, range, maxRows)
-    const { rows: limitedRows, remainingRows } = latestRows(fetchedRows, maxRows)
+    const fetched = await fetchHistoricalRows(asset, range, maxRows)
+    const { rows: limitedRows, remainingRows } = latestRows(fetched.rows, maxRows)
     const withFx = await applyHistoricalFx(limitedRows)
     const persistedRows = await persistBackfilledAsset(supabase, portfolioId, withFx)
     const latestPriceDate = withFx[withFx.length - 1]?.priceDate ?? null
     const fxMissingRows = withFx.filter((row) => row.sourceCurrency !== row.baseCurrency && row.closePriceBase == null).length
     const provider = withFx[0]?.provider ?? (isCrypto(asset) ? 'coingecko' : 'stooq')
     const sourceSymbol = withFx[0]?.sourceSymbol ?? (isCrypto(asset) ? resolveCoinGeckoId(asset) : normalizeStooqSymbol(asset))
+    const adjustedPriceRows = withFx.filter((row) => row.adjustedClosePrice !== row.closePrice).length
     const status: BackfillAssetStatus = remainingRows > 0 ? 'partial' : persistedRows > 0 ? 'success' : 'skipped'
     const error = remainingRows > 0
       ? `MAX/range returned more than ${maxRows} rows; saved newest rows. Run a narrower range if you need older data.`
@@ -567,16 +718,24 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
       provider,
       sourceSymbol,
       status,
-      fetchedRows: fetchedRows.length,
+      fetchedRows: fetched.rows.length,
       persistedRows,
       remainingRows,
       fxMissingRows,
       latestPriceDate,
       error,
+      providerFallbackChain: fetched.providerFallbackChain,
+      providerMessages: fetched.providerMessages,
+      adjustedPriceRows,
     }
   } catch (err: any) {
-    const provider = isCrypto(asset) ? 'coingecko' : 'stooq'
-    const sourceSymbol = provider === 'coingecko' ? resolveCoinGeckoId(asset) : normalizeStooqSymbol(asset)
+    const fallbackChain = providerFallbackOrderForAsset(asset)
+    const provider = fallbackChain[0] ?? (isCrypto(asset) ? 'coingecko' : 'eodhd')
+    const sourceSymbol = provider === 'coingecko'
+      ? resolveCoinGeckoId(asset)
+      : provider === 'eodhd'
+        ? normalizeEodhdSymbol(asset.market_symbol || asset.symbol)
+        : normalizeStooqSymbol(asset)
     const error = err?.message ?? 'Nie udało się wykonać backfillu.'
     await updateAssetBackfillStatus(supabase, asset.id, error).catch(() => undefined)
 
@@ -591,6 +750,9 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
       fxMissingRows: 0,
       latestPriceDate: null,
       error,
+      providerFallbackChain: fallbackChain,
+      providerMessages: [error],
+      adjustedPriceRows: 0,
     }
   }
 }

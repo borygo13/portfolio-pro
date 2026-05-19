@@ -9,6 +9,7 @@ NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=... # wymagane dla C4.1b/C4.1c zapisów server-side
 CRON_SECRET=... # wymagane dla /api/cron/prices
+EODHD_API_KEY=... # opcjonalnie dla C5.6 ETF/akcje/indeksy historical backfill
 ```
 
 2. W Supabase SQL Editor uruchom aktualny schemat bazowy Stage C3.4, jeśli nie był jeszcze zastosowany:
@@ -268,7 +269,8 @@ Zasady bezpieczeństwa:
 Providerzy:
 
 - Crypto: CoinGecko market chart range API dla zakresu 1Y; dla dłuższych publicznych zakresów używany jest bezpłatny fallback CryptoCompare, zapisywany pod stabilnym źródłem crypto, żeby nie dublować dziennych rekordów.
-- ETF/akcje: Stooq daily CSV, preferuje `assets.market_symbol`, a potem normalizuje `assets.symbol`. Jeśli Stooq wymaga klucza do CSV historycznego, ustaw server-side `STOOQ_API_KEY`.
+- ETF/akcje/indeksy: EODHD jest głównym providerem historycznym, preferuje `assets.market_symbol`, a potem normalizuje `assets.symbol`; Stooq pozostaje fallbackiem. Ustaw server-side `EODHD_API_KEY`. Jeśli EODHD nie ma klucza albo symbolu, raport per aktywo pokaże fallback do Stooq oraz sugestię CSV importu.
+- Stooq: fallback provider daily CSV. Jeśli Stooq wymaga klucza do CSV historycznego, ustaw server-side `STOOQ_API_KEY`.
 - FX: historyczne kursy NBP do PLN, zapisywane w `fx_rates`; jeśli kursu dla daty nie ma, `close_price_base` zostaje puste zamiast sztucznego przeliczenia.
 
 Daily cron `/api/cron/prices` pozostaje mechanizmem przyszłych dziennych aktualizacji. Backfill uzupełnia przeszłość w `market_prices`, a cron dopisuje kolejne dni.
@@ -282,6 +284,7 @@ NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...
 CRON_SECRET=...
+EODHD_API_KEY=... # opcjonalnie, primary provider dla ETF/akcji/indeksów
 STOOQ_API_KEY=... # opcjonalnie, wymagane jeśli Stooq zwraca komunikat "Get your apikey" dla historii CSV
 ```
 
@@ -293,9 +296,9 @@ npm run dev
 ```
 
 3. Wejdź do `Long-term -> Intelligence -> Backfill`.
-4. Dla ETF/akcji ustaw `market_symbol`, np. `iusq.de`, `aapl.us`, `msft.us`. Dla BTC możesz użyć CoinGecko ID `bitcoin`.
-5. Uruchom `Backfill selected asset` dla IUSQ.DE oraz crypto BTC/ETH/XRP.
-6. Sprawdź raport per aktywo: status, zapisane wiersze, braki FX i ewentualne pozostałe rows/assets.
+4. Dla ETF/akcji ustaw `market_symbol`, np. `IUSQ.DE`, `500.PA`, `CSPX.L`, `AAPL.US`. Dla BTC możesz użyć CoinGecko ID `bitcoin`.
+5. Uruchom `Backfill selected asset` dla IUSQ.DE, 500.PA, CSPX.L oraz crypto BTC/BNB.
+6. Sprawdź raport per aktywo: provider, fallback chain, zapisane wiersze, adjusted rows, braki FX i ewentualne pozostałe rows/assets.
 7. Wejdź na Dashboard i przełącz zakresy wykresów `30D/90D/1Y/3Y/5Y/MAX`.
 
 ### SQL verification

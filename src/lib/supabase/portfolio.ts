@@ -314,6 +314,8 @@ export type MarketPriceDiagnostics = {
   maxPriceDate: string | null
   latestPriceDate: string | null
   latestFetchedAt: string | null
+  expectedTradingDays: number
+  historyCoveragePct: number | null
   recentCalendarGapDays: number | null
   missingRecentTradingDays: number
   recentGapCount: number
@@ -434,19 +436,22 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
     fetched_at: string | null
   }[]
   const dates = rows.map((row) => marketDateKey(row.price_date)).filter(Boolean)
-  const minPriceDate = dates[0] ?? null
-  const maxPriceDate = dates[dates.length - 1] ?? null
+  const uniqueDates = Array.from(new Set(dates)).sort()
+  const minPriceDate = uniqueDates[0] ?? null
+  const maxPriceDate = uniqueDates[uniqueDates.length - 1] ?? null
   const latestFetchedAt = rows[rows.length - 1]?.fetched_at ?? null
   const today = new Date().toISOString().slice(0, 10)
+  const expectedTradingDays = minPriceDate && maxPriceDate ? marketWeekdaysAfter(marketAddDays(minPriceDate, -1), maxPriceDate) : 0
+  const historyCoveragePct = expectedTradingDays > 0 ? uniqueDates.length / expectedTradingDays : null
   const recentCalendarGapDays = maxPriceDate ? marketDaysBetween(maxPriceDate, today) : null
   const missingRecentTradingDays = marketWeekdaysAfter(maxPriceDate, today)
   const recentStart = marketAddDays(today, -90)
   let recentGapCount = 0
   let maxRecentGapDays = 0
-  for (let index = 1; index < dates.length; index += 1) {
-    const current = dates[index]
+  for (let index = 1; index < uniqueDates.length; index += 1) {
+    const current = uniqueDates[index]
     if (current < recentStart) continue
-    const gap = marketDaysBetween(dates[index - 1], current)
+    const gap = marketDaysBetween(uniqueDates[index - 1], current)
     if (gap > 4) recentGapCount += 1
     maxRecentGapDays = Math.max(maxRecentGapDays, gap)
   }
@@ -472,6 +477,7 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
   if (recentCalendarGapDays != null && recentCalendarGapDays > 7) warnings.push(`Latest price is ${recentCalendarGapDays} calendar days old.`)
   if (missingRecentTradingDays > 3) warnings.push(`${missingRecentTradingDays} recent weekdays have no market price rows.`)
   if (recentGapCount > 0) warnings.push(`${recentGapCount} recent history gap(s) exceed 4 calendar days.`)
+  if (historyCoveragePct != null && historyCoveragePct < 0.7) warnings.push(`History coverage is about ${Math.round(historyCoveragePct * 100)}% of expected weekdays.`)
   if (rows.length > 0 && missingBasePriceRows / rows.length > 0.5) warnings.push('Most rows do not have close_price_base; portfolio valuation needs FX coverage.')
 
   const quality: MarketPriceDiagnostics['quality'] = rows.length === 0
@@ -487,6 +493,8 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
     maxPriceDate,
     latestPriceDate: maxPriceDate,
     latestFetchedAt,
+    expectedTradingDays,
+    historyCoveragePct,
     recentCalendarGapDays,
     missingRecentTradingDays,
     recentGapCount,
