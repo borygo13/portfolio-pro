@@ -1,0 +1,511 @@
+import type {
+  CashLedgerEntry,
+  DividendRecord,
+  MarketPriceHistoryPoint,
+  PortfolioSnapshot,
+  SupportedCashCurrency,
+  Transaction,
+} from '@/lib/supabase/portfolio'
+
+export type ReturnMetric = {
+  available: boolean
+  value: number | null
+  reason?: string
+  startDate?: string | null
+  endDate?: string | null
+}
+
+export type ReturnInterval = {
+  startDate: string
+  endDate: string
+  startValue: number
+  endValue: number
+  externalFlow: number
+  income: number
+  expense: number
+  transactionFlowProxy: number
+  denominator: number
+  returnPct: number | null
+  validForTwr: boolean
+  excludedReason?: string
+}
+
+export type ReturnCurvePoint = {
+  date: string
+  label: string
+  value: number
+  returnPct: number
+}
+
+export type RollingReturnPoint = {
+  date: string
+  label: string
+  rollingReturnPct: number
+}
+
+export type DrawdownCurvePoint = {
+  date: string
+  label: string
+  drawdownPct: number
+}
+
+export type BenchmarkRelativePoint = {
+  date: string
+  label: string
+  portfolio: number
+  benchmark: number
+  relativeReturnPct: number
+}
+
+export type TruePortfolioReturns = {
+  intervals: ReturnInterval[]
+  validIntervals: ReturnInterval[]
+  excludedIntervals: ReturnInterval[]
+  cumulativeReturnCurve: ReturnCurvePoint[]
+  rollingReturnCurve: RollingReturnPoint[]
+  drawdownCurve: DrawdownCurvePoint[]
+  benchmarkRelativeCurve: BenchmarkRelativePoint[]
+  twrReturn: ReturnMetric
+  mwrApprox: ReturnMetric
+  cagr: ReturnMetric
+  rolling30dVolatility: ReturnMetric
+  bestRolling12m: ReturnMetric
+  worstRolling12m: ReturnMetric
+  benchmarkRelativeReturn: ReturnMetric
+  recoveryFromDrawdownMonths: ReturnMetric
+  summaryReason: string | null
+}
+
+type ReturnEvent = {
+  date: string
+  externalFlow: number
+  income: number
+  expense: number
+  transactionFlowProxy: number
+}
+
+type EngineInput = {
+  snapshots: PortfolioSnapshot[]
+  cashEntries: CashLedgerEntry[]
+  dividends: DividendRecord[]
+  transactions: Transaction[]
+  benchmarkHistory: MarketPriceHistoryPoint[]
+  baseCurrency?: SupportedCashCurrency | string | null
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+const EPS = 0.000001
+const MIN_RETURN_BASE = 100
+const MIN_VALID_INTERVALS = 10
+const MIN_CURVE_POINTS = 10
+const MAX_INTERVAL_GAP_DAYS = 45
+const MAX_INTERVAL_RETURN = 0.85
+const MAX_TOTAL_RETURN = 10
+const MAX_EXCLUDED_RATIO = 0.4
+const CASH_FLOW_DOMINANCE_MULTIPLE = 1.5
+const ROLLING_YEAR_DAYS = 365
+const ROLLING_VOL_DAYS = 30
+const BENCHMARK_STALE_DAYS = 10
+const MIN_BENCHMARK_OVERLAP_DAYS = 30
+
+function n(value: unknown) {
+  const parsed = Number(value ?? 0)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function supportedCurrency(value: string | null | undefined): SupportedCashCurrency {
+  return value === 'EUR' || value === 'USD' || value === 'PLN' ? value : 'PLN'
+}
+
+function dateLabel(value: string) {
+  const date = new Date(`${value}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleDateString('pl-PL', { day: '2-digit', month: 'short', year: '2-digit' })
+}
+
+function daysBetween(start: string, end: string) {
+  const startTime = new Date(`${start}T00:00:00`).getTime()
+  const endTime = new Date(`${end}T00:00:00`).getTime()
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return 0
+  return Math.max(0, (endTime - startTime) / DAY_MS)
+}
+
+function addDays(date: string, days: number) {
+  const value = new Date(`${date}T00:00:00.000Z`)
+  value.setUTCDate(value.getUTCDate() + days)
+  return value.toISOString().slice(0, 10)
+}
+
+function sortSnapshots(snapshots: PortfolioSnapshot[]) {
+  return snapshots
+    .filter((snapshot) => n(snapshot.total_value) > 0)
+    .slice()
+    .sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))
+}
+
+function metric(value: number | null, reason?: string, startDate?: string | null, endDate?: string | null): ReturnMetric {
+  const available = value != null && Number.isFinite(value)
+  return { available, value: available ? value : null, reason: available ? undefined : reason ?? 'Limited data.', startDate, endDate }
+}
+
+function emptyEvent(date: string): ReturnEvent {
+  return { date, externalFlow: 0, income: 0, expense: 0, transactionFlowProxy: 0 }
+}
+
+function addEvent(map: Map<string, ReturnEvent>, date: string, patch: Partial<Omit<ReturnEvent, 'date'>>) {
+  const current = map.get(date) ?? emptyEvent(date)
+  current.externalFlow += patch.externalFlow ?? 0
+  current.income += patch.income ?? 0
+  current.expense += patch.expense ?? 0
+  current.transactionFlowProxy += patch.transactionFlowProxy ?? 0
+  map.set(date, current)
+}
+
+function buildEvents(input: EngineInput) {
+  const baseCurrency = supportedCurrency(input.baseCurrency)
+  const events = new Map<string, ReturnEvent>()
+
+  for (const entry of input.cashEntries) {
+    if (supportedCurrency(entry.currency) !== baseCurrency) continue
+    const amount = n(entry.amount)
+    if (amount <= 0) continue
+    if (entry.entry_type === 'deposit') addEvent(events, entry.entry_date, { externalFlow: amount })
+    if (entry.entry_type === 'withdrawal') addEvent(events, entry.entry_date, { externalFlow: -amount })
+    if (entry.entry_type === 'adjustment') addEvent(events, entry.entry_date, { externalFlow: amount })
+    if (entry.entry_type === 'fee' || entry.entry_type === 'tax') addEvent(events, entry.entry_date, { expense: amount })
+  }
+
+  for (const dividend of input.dividends) {
+    if (supportedCurrency(dividend.currency) !== baseCurrency) continue
+    const income = n(dividend.net_amount)
+    if (income > 0) addEvent(events, dividend.payment_date, { income })
+  }
+
+  for (const transaction of input.transactions) {
+    const assetCurrency = supportedCurrency(transaction.assets?.currency ?? baseCurrency)
+    if (assetCurrency !== baseCurrency) continue
+    const gross = n(transaction.quantity) * n(transaction.price)
+    const fees = n(transaction.fees)
+    if (fees > 0) addEvent(events, transaction.transaction_date, { expense: fees })
+    if (gross <= 0) continue
+    const flow = transaction.transaction_type === 'BUY' ? gross + fees : -(gross - fees)
+    addEvent(events, transaction.transaction_date, { transactionFlowProxy: flow })
+  }
+
+  return Array.from(events.values()).sort((a, b) => a.date.localeCompare(b.date))
+}
+
+function snapshotFlowBetween(start: PortfolioSnapshot, end: PortfolioSnapshot) {
+  const contributionDelta = n(end.contribution) - n(start.contribution)
+  if (Math.abs(contributionDelta) > EPS) return contributionDelta
+
+  const netCashFlow = n(end.net_cash_flow)
+  if (Math.abs(netCashFlow) > EPS) return netCashFlow
+
+  const investedCostDelta = n(end.invested_cost) - n(start.invested_cost)
+  if (Math.abs(investedCostDelta) > EPS) return investedCostDelta
+
+  return 0
+}
+
+function consumeEventsBetween(events: ReturnEvent[], cursor: { value: number }, startDate: string, endDate: string) {
+  const consumed = emptyEvent(endDate)
+  while (cursor.value < events.length && events[cursor.value].date <= startDate) cursor.value += 1
+  while (cursor.value < events.length && events[cursor.value].date <= endDate) {
+    const event = events[cursor.value]
+    consumed.externalFlow += event.externalFlow
+    consumed.income += event.income
+    consumed.expense += event.expense
+    consumed.transactionFlowProxy += event.transactionFlowProxy
+    cursor.value += 1
+  }
+  return consumed
+}
+
+function intervalFromSnapshots(start: PortfolioSnapshot, end: PortfolioSnapshot, event: ReturnEvent): ReturnInterval {
+  const startValue = n(start.total_value)
+  const endValue = n(end.total_value)
+  const snapshotFlow = snapshotFlowBetween(start, end)
+  const externalFlow = Math.abs(event.externalFlow) > EPS
+    ? event.externalFlow
+    : Math.abs(snapshotFlow) > EPS
+      ? snapshotFlow
+      : event.transactionFlowProxy
+  const denominator = startValue + externalFlow * 0.5
+  const gapDays = daysBetween(start.snapshot_date, end.snapshot_date)
+
+  const base: Omit<ReturnInterval, 'returnPct' | 'validForTwr'> = {
+    startDate: start.snapshot_date,
+    endDate: end.snapshot_date,
+    startValue,
+    endValue,
+    externalFlow,
+    income: event.income,
+    expense: event.expense,
+    transactionFlowProxy: event.transactionFlowProxy,
+    denominator,
+  }
+
+  if (gapDays <= 0) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Duplicate snapshot date.' }
+  if (gapDays > MAX_INTERVAL_GAP_DAYS) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Sparse snapshot gap.' }
+  if (startValue <= 0 || endValue <= 0) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Missing portfolio value.' }
+  if (denominator < MIN_RETURN_BASE) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Starting base too low.' }
+
+  const cashFlowDominated = Math.abs(externalFlow) > Math.max(MIN_RETURN_BASE * 5, startValue * CASH_FLOW_DOMINANCE_MULTIPLE)
+  if (cashFlowDominated) {
+    return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Cash-flow dominated interval.' }
+  }
+
+  const returnPct = (endValue + event.income - event.expense - startValue - externalFlow) / denominator
+  if (!Number.isFinite(returnPct)) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Return is not finite.' }
+  if (Math.abs(returnPct) > MAX_INTERVAL_RETURN) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Interval return too extreme.' }
+
+  return { ...base, returnPct, validForTwr: true }
+}
+
+function buildIntervals(snapshots: PortfolioSnapshot[], events: ReturnEvent[]) {
+  const cursor = { value: 0 }
+  const intervals: ReturnInterval[] = []
+  for (let index = 1; index < snapshots.length; index += 1) {
+    const start = snapshots[index - 1]
+    const end = snapshots[index]
+    const event = consumeEventsBetween(events, cursor, start.snapshot_date, end.snapshot_date)
+    intervals.push(intervalFromSnapshots(start, end, event))
+  }
+  return intervals
+}
+
+function cumulativeCurve(validIntervals: ReturnInterval[]) {
+  if (validIntervals.length < MIN_VALID_INTERVALS) return []
+  let indexValue = 100
+  const curve: ReturnCurvePoint[] = [{
+    date: validIntervals[0].startDate,
+    label: dateLabel(validIntervals[0].startDate),
+    value: 100,
+    returnPct: 0,
+  }]
+
+  for (const interval of validIntervals) {
+    indexValue *= 1 + (interval.returnPct ?? 0)
+    if (!Number.isFinite(indexValue) || indexValue <= 0 || indexValue > (1 + MAX_TOTAL_RETURN) * 100) return []
+    curve.push({
+      date: interval.endDate,
+      label: dateLabel(interval.endDate),
+      value: indexValue,
+      returnPct: indexValue / 100 - 1,
+    })
+  }
+
+  return curve
+}
+
+function twrMetric(curve: ReturnCurvePoint[], excludedRatio: number) {
+  if (curve.length < MIN_CURVE_POINTS) return metric(null, 'Need more valid contribution-adjusted intervals.')
+  if (excludedRatio > MAX_EXCLUDED_RATIO) return metric(null, 'Too many intervals were excluded from TWR.')
+  const value = curve[curve.length - 1].value / 100 - 1
+  if (!Number.isFinite(value) || Math.abs(value) > MAX_TOTAL_RETURN) return metric(null, 'TWR suppressed because the estimate is too extreme.')
+  return metric(value, undefined, curve[0].date, curve[curve.length - 1].date)
+}
+
+function mwrApproxMetric(snapshots: PortfolioSnapshot[], intervals: ReturnInterval[]) {
+  if (snapshots.length < 2 || intervals.length < MIN_VALID_INTERVALS) return metric(null, 'Need more portfolio history.')
+  const first = snapshots[0]
+  const last = snapshots[snapshots.length - 1]
+  const totalDays = Math.max(1, daysBetween(first.snapshot_date, last.snapshot_date))
+  const beginValue = n(first.total_value)
+  const endingValue = n(last.total_value)
+  if (beginValue < MIN_RETURN_BASE) return metric(null, 'Starting portfolio value is too low.')
+
+  let totalFlows = 0
+  let weightedFlows = 0
+  let income = 0
+  let expense = 0
+  for (const interval of intervals) {
+    totalFlows += interval.externalFlow
+    income += interval.income
+    expense += interval.expense
+    const daysRemaining = Math.max(0, daysBetween(interval.endDate, last.snapshot_date))
+    weightedFlows += interval.externalFlow * (daysRemaining / totalDays)
+  }
+
+  const denominator = beginValue + weightedFlows
+  if (denominator < MIN_RETURN_BASE) return metric(null, 'Money-weighted denominator is too low.')
+  const value = (endingValue + income - expense - beginValue - totalFlows) / denominator
+  if (!Number.isFinite(value) || Math.abs(value) > MAX_TOTAL_RETURN) return metric(null, 'MWR estimate suppressed by safety guard.')
+  return metric(value, undefined, first.snapshot_date, last.snapshot_date)
+}
+
+function cagrMetric(twr: ReturnMetric) {
+  if (!twr.available || twr.value == null || !twr.startDate || !twr.endDate) return metric(null, twr.reason ?? 'TWR is unavailable.')
+  const days = daysBetween(twr.startDate, twr.endDate)
+  if (days < 365) return metric(null, 'Need at least one year of valid history.')
+  const value = (1 + twr.value) ** (365 / days) - 1
+  if (!Number.isFinite(value) || Math.abs(value) > MAX_TOTAL_RETURN) return metric(null, 'CAGR suppressed by safety guard.')
+  return metric(value, undefined, twr.startDate, twr.endDate)
+}
+
+function rollingReturnCurve(curve: ReturnCurvePoint[], windowDays = ROLLING_YEAR_DAYS) {
+  const points: RollingReturnPoint[] = []
+  let startIndex = 0
+  for (let index = 1; index < curve.length; index += 1) {
+    const point = curve[index]
+    const targetDate = addDays(point.date, -windowDays)
+    while (startIndex + 1 < index && curve[startIndex + 1].date <= targetDate) startIndex += 1
+    const start = curve[startIndex]
+    if (daysBetween(start.date, point.date) < windowDays * 0.8) continue
+    const rollingReturnPct = point.value / start.value - 1
+    if (!Number.isFinite(rollingReturnPct) || Math.abs(rollingReturnPct) > MAX_TOTAL_RETURN) continue
+    points.push({ date: point.date, label: dateLabel(point.date), rollingReturnPct })
+  }
+  return points
+}
+
+function rollingExtremes(points: RollingReturnPoint[]) {
+  if (points.length === 0) {
+    return {
+      best: metric(null, 'Need at least 12 months of valid return curve.'),
+      worst: metric(null, 'Need at least 12 months of valid return curve.'),
+    }
+  }
+  const best = points.reduce((winner, point) => point.rollingReturnPct > winner.rollingReturnPct ? point : winner, points[0])
+  const worst = points.reduce((loser, point) => point.rollingReturnPct < loser.rollingReturnPct ? point : loser, points[0])
+  return {
+    best: metric(best.rollingReturnPct, undefined, addDays(best.date, -ROLLING_YEAR_DAYS), best.date),
+    worst: metric(worst.rollingReturnPct, undefined, addDays(worst.date, -ROLLING_YEAR_DAYS), worst.date),
+  }
+}
+
+function rolling30dVolatility(validIntervals: ReturnInterval[]) {
+  if (validIntervals.length === 0) return metric(null, 'Need valid return observations.')
+  const lastDate = validIntervals[validIntervals.length - 1].endDate
+  const startDate = addDays(lastDate, -ROLLING_VOL_DAYS)
+  const window = validIntervals.filter((interval) => interval.endDate >= startDate)
+  if (window.length < 10) return metric(null, 'Need at least 10 valid observations in the latest 30D window.')
+  const returns = window.map((interval) => interval.returnPct ?? 0)
+  const average = returns.reduce((sum, value) => sum + value, 0) / returns.length
+  const variance = returns.reduce((sum, value) => sum + (value - average) ** 2, 0) / (returns.length - 1)
+  const value = Math.sqrt(Math.max(0, variance)) * Math.sqrt(252)
+  if (!Number.isFinite(value) || value > 5) return metric(null, 'Volatility suppressed by safety guard.')
+  return metric(value, undefined, startDate, lastDate)
+}
+
+function drawdownCurve(curve: ReturnCurvePoint[]) {
+  let peak = 0
+  const points: DrawdownCurvePoint[] = []
+  for (const point of curve) {
+    peak = Math.max(peak, point.value)
+    const drawdownPct = peak > 0 ? point.value / peak - 1 : 0
+    if (Number.isFinite(drawdownPct)) points.push({ date: point.date, label: point.label, drawdownPct })
+  }
+  return points
+}
+
+function recoveryMetric(drawdowns: DrawdownCurvePoint[], validIntervals: ReturnInterval[]) {
+  if (drawdowns.length === 0) return metric(null, 'Need drawdown history.')
+  const current = drawdowns[drawdowns.length - 1].drawdownPct
+  if (current >= -EPS) return metric(0, undefined, drawdowns[drawdowns.length - 1].date, drawdowns[drawdowns.length - 1].date)
+  const recent = validIntervals.slice(-90).map((interval) => interval.returnPct ?? 0).filter((value) => Number.isFinite(value))
+  if (recent.length < 20) return metric(null, 'Need more recent valid intervals.')
+  const average = recent.reduce((sum, value) => sum + value, 0) / recent.length
+  if (average <= 0) return metric(null, 'Recent return pace is not positive.')
+  const days = Math.log(1 / (1 + current)) / Math.log(1 + average)
+  if (!Number.isFinite(days) || days < 0 || days > 3650) return metric(null, 'Recovery estimate unavailable.')
+  return metric(days / 30, undefined, drawdowns[drawdowns.length - 1].date, null)
+}
+
+function benchmarkValue(point: MarketPriceHistoryPoint) {
+  const value = n(point.close_price_base ?? point.close_price)
+  return value > 0 ? value : null
+}
+
+function closestBenchmarkPoint(history: MarketPriceHistoryPoint[], date: string, startIndex: number) {
+  let index = startIndex
+  while (index < history.length - 1 && history[index + 1].price_date <= date) index += 1
+  const point = history[index]
+  if (!point || point.price_date > date || daysBetween(point.price_date, date) > BENCHMARK_STALE_DAYS) return { point: null, index }
+  return { point, index }
+}
+
+function benchmarkRelative(curve: ReturnCurvePoint[], history: MarketPriceHistoryPoint[]) {
+  const benchmark = history
+    .filter((point) => benchmarkValue(point) != null)
+    .slice()
+    .sort((a, b) => a.price_date.localeCompare(b.price_date))
+
+  if (curve.length < 2 || benchmark.length < 2) {
+    return { points: [], metric: metric(null, 'Need portfolio and benchmark history.') }
+  }
+
+  const matched: { curve: ReturnCurvePoint; benchmarkPrice: number }[] = []
+  let benchmarkIndex = 0
+  for (const point of curve) {
+    const match = closestBenchmarkPoint(benchmark, point.date, benchmarkIndex)
+    benchmarkIndex = match.index
+    const price = match.point ? benchmarkValue(match.point) : null
+    if (price != null) matched.push({ curve: point, benchmarkPrice: price })
+  }
+
+  if (matched.length < 2) return { points: [], metric: metric(null, 'Benchmark overlap too short.') }
+  const first = matched[0]
+  const last = matched[matched.length - 1]
+  if (daysBetween(first.curve.date, last.curve.date) < MIN_BENCHMARK_OVERLAP_DAYS) {
+    return { points: [], metric: metric(null, 'Benchmark overlap too short.', first.curve.date, last.curve.date) }
+  }
+
+  const basePortfolio = first.curve.value
+  const baseBenchmark = first.benchmarkPrice
+  const points = matched.flatMap((item) => {
+    const portfolio = item.curve.value / basePortfolio * 100
+    const benchmarkValueIndexed = item.benchmarkPrice / baseBenchmark * 100
+    if (!Number.isFinite(portfolio) || !Number.isFinite(benchmarkValueIndexed)) return []
+    return [{
+      date: item.curve.date,
+      label: item.curve.label,
+      portfolio,
+      benchmark: benchmarkValueIndexed,
+      relativeReturnPct: portfolio / benchmarkValueIndexed - 1,
+    }]
+  })
+
+  if (points.length < 2) return { points: [], metric: metric(null, 'Benchmark comparison has too few valid points.') }
+  const final = points[points.length - 1]
+  const relative = final.portfolio / final.benchmark - 1
+  if (!Number.isFinite(relative) || Math.abs(relative) > MAX_TOTAL_RETURN) {
+    return { points: [], metric: metric(null, 'Benchmark-relative estimate suppressed by safety guard.') }
+  }
+  return { points, metric: metric(relative, undefined, first.curve.date, last.curve.date) }
+}
+
+export function buildTruePortfolioReturns(input: EngineInput): TruePortfolioReturns {
+  const snapshots = sortSnapshots(input.snapshots)
+  const events = buildEvents(input)
+  const intervals = buildIntervals(snapshots, events)
+  const validIntervals = intervals.filter((interval) => interval.validForTwr && interval.returnPct != null)
+  const excludedIntervals = intervals.filter((interval) => !interval.validForTwr)
+  const excludedRatio = intervals.length > 0 ? excludedIntervals.length / intervals.length : 1
+  const curve = cumulativeCurve(validIntervals)
+  const twr = twrMetric(curve, excludedRatio)
+  const rolling = rollingReturnCurve(curve)
+  const rollingBounds = rollingExtremes(rolling)
+  const drawdowns = drawdownCurve(curve)
+  const benchmark = benchmarkRelative(curve, input.benchmarkHistory)
+
+  return {
+    intervals,
+    validIntervals,
+    excludedIntervals,
+    cumulativeReturnCurve: curve,
+    rollingReturnCurve: rolling,
+    drawdownCurve: drawdowns,
+    benchmarkRelativeCurve: benchmark.points,
+    twrReturn: twr,
+    mwrApprox: mwrApproxMetric(snapshots, intervals),
+    cagr: cagrMetric(twr),
+    rolling30dVolatility: rolling30dVolatility(validIntervals),
+    bestRolling12m: rollingBounds.best,
+    worstRolling12m: rollingBounds.worst,
+    benchmarkRelativeReturn: benchmark.metric,
+    recoveryFromDrawdownMonths: recoveryMetric(drawdowns, validIntervals),
+    summaryReason: twr.available ? null : twr.reason ?? 'True return engine needs more valid history.',
+  }
+}
