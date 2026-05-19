@@ -194,6 +194,60 @@ export function BenchmarkComparisonChart({ data, range = 'MAX' }: { data: { date
   )
 }
 
+export function RollingReturnChart({ data, range = 'MAX' }: { data: { date: string; rollingReturnPct: number }[]; range?: ChartRange }) {
+  const axisRange = effectiveAxisRange(data, range)
+
+  return (
+    <ResponsiveContainer width="100%" height={250}>
+      <LineChart data={data} margin={{ top: 12, right: 8, left: 0, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
+        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={28} />
+        <YAxis width={58} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => PCT.format(Number(v))} />
+        <Tooltip formatter={(v) => PCT.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
+        <Line type="monotone" dataKey="rollingReturnPct" name="Rolling 12M" stroke="#22c55e" strokeWidth={3} dot={false} />
+      </LineChart>
+    </ResponsiveContainer>
+  )
+}
+
+export function DrawdownCurveChart({ data, range = 'MAX' }: { data: { date: string; drawdownPct: number }[]; range?: ChartRange }) {
+  const axisRange = effectiveAxisRange(data, range)
+
+  return (
+    <ResponsiveContainer width="100%" height={250}>
+      <AreaChart data={data} margin={{ top: 12, right: 8, left: 0, bottom: 0 }}>
+        <defs>
+          <linearGradient id="drawdownGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor="#ef4444" stopOpacity={0.35} />
+            <stop offset="95%" stopColor="#ef4444" stopOpacity={0.03} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
+        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={28} />
+        <YAxis width={58} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => PCT.format(Number(v))} />
+        <Tooltip formatter={(v) => PCT.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
+        <Area type="monotone" dataKey="drawdownPct" name="Drawdown" stroke="#ef4444" strokeWidth={3} fill="url(#drawdownGradient)" />
+      </AreaChart>
+    </ResponsiveContainer>
+  )
+}
+
+export function BenchmarkRelativeChart({ data, range = 'MAX' }: { data: { date: string; relativeReturnPct: number }[]; range?: ChartRange }) {
+  const axisRange = effectiveAxisRange(data, range)
+
+  return (
+    <ResponsiveContainer width="100%" height={250}>
+      <LineChart data={data} margin={{ top: 12, right: 8, left: 0, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
+        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={28} />
+        <YAxis width={58} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => PCT.format(Number(v))} />
+        <Tooltip formatter={(v) => PCT.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
+        <Line type="monotone" dataKey="relativeReturnPct" name="Relative" stroke="#06b6d4" strokeWidth={3} dot={false} />
+      </LineChart>
+    </ResponsiveContainer>
+  )
+}
+
 export function PnlChart({ data }: { data: any[] }) {
   return (
     <ResponsiveContainer width="100%" height={260}>

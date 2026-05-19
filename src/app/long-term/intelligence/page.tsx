@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent, FormEvent, InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from 'react'
 import { Banknote, BarChart3, CheckCircle2, FileUp, History, Loader2, Percent, Plus, Save, Search, Scale, Trash2, TrendingDown, TrendingUp } from 'lucide-react'
-import { BenchmarkComparisonChart, MonthlyDividendChart } from '@/components/Charts'
+import { BenchmarkComparisonChart, BenchmarkRelativeChart, DrawdownCurveChart, MonthlyDividendChart, RollingReturnChart } from '@/components/Charts'
 import { Card, PageHeader, Shell, StatCard, TrustBadge } from '@/components/Shell'
 import { projectEdoBond, summarizeEdoBonds } from '@/lib/bond-engine'
 import { PLN, PCT } from '@/lib/format'
@@ -21,9 +21,12 @@ import {
   type BenchmarkPerformance,
   type MonthlyReturnCell,
   type PortfolioPerformance,
-  type ReturnPeriod,
   type YearlyReturnPoint,
 } from '@/lib/portfolio-performance'
+import {
+  buildTruePortfolioReturns,
+  type ReturnMetric,
+} from '@/lib/portfolio-returns'
 import { buildPositions, portfolioSummary } from '@/lib/position-engine'
 import {
   CSV_IMPORT_SOURCE_LABELS,
@@ -235,28 +238,30 @@ function catalogMeta(row: InstrumentCatalogRow) {
   return `${row.provider} · ${row.category.replaceAll('_', ' ')} · ${row.currency}${row.exchange ? ` · ${row.exchange}` : ''}`
 }
 
-function periodByKey(periods: ReturnPeriod[], key: ReturnPeriod['key']) {
-  return periods.find((period) => period.key === key) ?? null
-}
-
-function periodSub(period: ReturnPeriod | null) {
-  if (!period?.available) return period?.reason ?? 'snapshot history unavailable'
-  if (!period.startDate || !period.endDate) return 'snapshot-based estimate'
-  return `${formatDate(period.startDate)} → ${formatDate(period.endDate)}`
-}
-
-function monthSub(month: MonthlyReturnCell | null) {
-  if (!month) return 'need monthly snapshots'
-  return `${month.monthLabel} ${month.year}`
-}
-
-function returnCardTone(value: number | null | undefined, available = value != null) {
-  if (!available || value == null) return 'cyan'
-  return value >= 0 ? 'emerald' : 'red'
-}
-
 function metricOrReason(value: number | null, reason: string | null | undefined) {
   return value == null ? reason ?? 'Limited data' : formatPct(value)
+}
+
+function returnMetricValue(metric: ReturnMetric) {
+  return metric.available ? formatPct(metric.value) : '—'
+}
+
+function returnMetricSub(metric: ReturnMetric, fallback = 'true return engine') {
+  if (!metric.available) return metric.reason ?? 'Limited data'
+  if (metric.startDate && metric.endDate) return `${formatDate(metric.startDate)} → ${formatDate(metric.endDate)}`
+  return fallback
+}
+
+function returnMetricTone(metric: ReturnMetric, positiveIsGood = true) {
+  if (!metric.available || metric.value == null) return 'cyan'
+  const positive = metric.value >= 0
+  return positive === positiveIsGood ? 'emerald' : 'red'
+}
+
+function recoveryMetricValue(metric: ReturnMetric) {
+  if (!metric.available || metric.value == null) return '—'
+  if (metric.value === 0) return 'Recovered'
+  return `${metric.value.toFixed(1)} mo`
 }
 
 export default function PortfolioIntelligencePage() {
@@ -411,6 +416,14 @@ export default function PortfolioIntelligencePage() {
   const monthlyDividends = useMemo(() => buildMonthlyDividendPoints(dividendRecords, baseCurrency), [dividendRecords, baseCurrency])
   const performance = useMemo(() => buildPortfolioPerformance(snapshots), [snapshots])
   const benchmarkPerformance = useMemo(() => buildBenchmarkPerformance(snapshots, benchmarkHistory), [snapshots, benchmarkHistory])
+  const trueReturns = useMemo(() => buildTruePortfolioReturns({
+    snapshots,
+    cashEntries,
+    dividends: dividendRecords,
+    transactions,
+    benchmarkHistory,
+    baseCurrency,
+  }), [snapshots, cashEntries, dividendRecords, transactions, benchmarkHistory, baseCurrency])
   const bondsTarget = useMemo(() => {
     const explicitTarget = assets
       .filter((asset) => asset.asset_type === 'Obligacje' || asset.symbol.toUpperCase().includes('EDO'))
@@ -434,11 +447,6 @@ export default function PortfolioIntelligencePage() {
   const csvPreview = useMemo(() => parseHistoricalPriceCsv(csvText), [csvText])
   const latestSnapshotAllocation = snapshots[snapshots.length - 1]?.allocation_breakdown ?? []
   const portfolioHistoryPoints = snapshots.filter((snapshot) => num(snapshot.total_value) > 0).length
-  const mtdPeriod = periodByKey(performance.periods, 'MTD')
-  const ytdPeriod = periodByKey(performance.periods, 'YTD')
-  const oneYearPeriod = periodByKey(performance.periods, '1Y')
-  const threeYearPeriod = periodByKey(performance.periods, '3Y')
-  const maxPeriod = periodByKey(performance.periods, 'MAX')
   const singleMonthlyReturn = performance.monthlyReturns.length === 1 ? performance.monthlyReturns[0] : null
 
   async function handleCashSubmit(event: FormEvent<HTMLFormElement>) {
@@ -708,7 +716,7 @@ export default function PortfolioIntelligencePage() {
       <PageHeader
         eyebrow="Stage C5 · Portfolio Intelligence"
         title="Intelligence"
-        description="Cash ledger, dywidendy, proste metryki performance, benchmark i drift alokacji. Metryki są bazowe/estymowane, dopóki nie wdrożymy pełnego TWR/MWR."
+        description="Cash ledger, dywidendy, TWR/MWR-style performance analytics, benchmark i drift alokacji. Metryki nadal oznaczają ograniczenia danych, gdy historia jest zbyt rzadka."
       />
 
       {error ? <div className="mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
@@ -730,17 +738,59 @@ export default function PortfolioIntelligencePage() {
       {activeTab === 'overview' ? (
         <div className="space-y-6">
           <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-            <StatCard icon={Percent} label="MTD return" value={formatPct(mtdPeriod?.returnPct ?? null)} sub={periodSub(mtdPeriod)} tone={returnCardTone(mtdPeriod?.returnPct, mtdPeriod?.available)} />
-            <StatCard icon={BarChart3} label="YTD return" value={formatPct(ytdPeriod?.returnPct ?? null)} sub={periodSub(ytdPeriod)} tone={returnCardTone(ytdPeriod?.returnPct, ytdPeriod?.available)} />
-            <StatCard icon={TrendingUp} label="1Y return" value={formatPct(oneYearPeriod?.returnPct ?? null)} sub={periodSub(oneYearPeriod)} tone={returnCardTone(oneYearPeriod?.returnPct, oneYearPeriod?.available)} />
-            <StatCard icon={TrendingUp} label="3Y return" value={formatPct(threeYearPeriod?.returnPct ?? null)} sub={periodSub(threeYearPeriod)} tone={returnCardTone(threeYearPeriod?.returnPct, threeYearPeriod?.available)} />
+            <StatCard icon={Percent} label="TWR return" value={returnMetricValue(trueReturns.twrReturn)} sub={returnMetricSub(trueReturns.twrReturn, 'cash-flow neutral')} tone={returnMetricTone(trueReturns.twrReturn)} />
+            <StatCard icon={TrendingUp} label="CAGR" value={returnMetricValue(trueReturns.cagr)} sub={returnMetricSub(trueReturns.cagr, 'annualized TWR')} tone={returnMetricTone(trueReturns.cagr)} />
+            <StatCard icon={Scale} label="MWR approx." value={returnMetricValue(trueReturns.mwrApprox)} sub={returnMetricSub(trueReturns.mwrApprox, 'Modified Dietz estimate')} tone={returnMetricTone(trueReturns.mwrApprox)} />
+            <StatCard icon={BarChart3} label="Benchmark relative" value={returnMetricValue(trueReturns.benchmarkRelativeReturn)} sub={returnMetricSub(trueReturns.benchmarkRelativeReturn, 'common overlap')} tone={returnMetricTone(trueReturns.benchmarkRelativeReturn)} />
           </div>
 
           <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-            <StatCard icon={Scale} label="MAX return" value={formatPct(maxPeriod?.returnPct ?? null)} sub={periodSub(maxPeriod)} tone={returnCardTone(maxPeriod?.returnPct, maxPeriod?.available)} />
-            <StatCard icon={TrendingDown} label="Max drawdown" value={formatPct(performance.maxDrawdownPct)} sub={performance.maxDrawdownDate ? formatDate(performance.maxDrawdownDate) : performance.maxDrawdownReason ?? 'limited data'} tone={performance.maxDrawdownPct == null ? 'cyan' : 'red'} />
-            <StatCard icon={TrendingUp} label="Best month" value={formatPct(performance.bestMonth?.returnPct ?? null)} sub={monthSub(performance.bestMonth)} tone="emerald" />
-            <StatCard icon={TrendingDown} label="Worst month" value={formatPct(performance.worstMonth?.returnPct ?? null)} sub={monthSub(performance.worstMonth)} tone="red" />
+            <StatCard icon={TrendingUp} label="Rolling 30D vol." value={returnMetricValue(trueReturns.rolling30dVolatility)} sub={returnMetricSub(trueReturns.rolling30dVolatility, 'annualized')} tone={trueReturns.rolling30dVolatility.available ? 'violet' : 'cyan'} />
+            <StatCard icon={TrendingUp} label="Best rolling 12M" value={returnMetricValue(trueReturns.bestRolling12m)} sub={returnMetricSub(trueReturns.bestRolling12m)} tone={returnMetricTone(trueReturns.bestRolling12m)} />
+            <StatCard icon={TrendingDown} label="Worst rolling 12M" value={returnMetricValue(trueReturns.worstRolling12m)} sub={returnMetricSub(trueReturns.worstRolling12m)} tone={returnMetricTone(trueReturns.worstRolling12m)} />
+            <StatCard icon={TrendingDown} label="Drawdown recovery" value={recoveryMetricValue(trueReturns.recoveryFromDrawdownMonths)} sub={returnMetricSub(trueReturns.recoveryFromDrawdownMonths, 'estimated months')} tone={trueReturns.recoveryFromDrawdownMonths.available ? 'cyan' : 'red'} />
+          </div>
+
+          {trueReturns.summaryReason ? (
+            <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 text-sm text-cyan-100">
+              True return engine limited data: {trueReturns.summaryReason}
+            </div>
+          ) : null}
+
+          <div className="grid gap-3 md:grid-cols-4">
+            <InfoLine label="Valid TWR intervals" value={String(trueReturns.validIntervals.length)} />
+            <InfoLine label="Excluded intervals" value={String(trueReturns.excludedIntervals.length)} />
+            <InfoLine label="TWR curve points" value={String(trueReturns.cumulativeReturnCurve.length)} />
+            <InfoLine label="Benchmark points" value={String(trueReturns.benchmarkRelativeCurve.length)} />
+          </div>
+
+          <div className="grid gap-6 2xl:grid-cols-3">
+            <Card>
+              <div className="mb-5 flex items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-lg font-bold text-white">Rolling 12M return</h3>
+                  <p className="mt-1 text-sm text-slate-500">TWR-based rolling return, excluding invalid cash-flow dominated intervals.</p>
+                </div>
+                <TrustBadge>TWR</TrustBadge>
+              </div>
+              {trueReturns.rollingReturnCurve.length > 0 ? <RollingReturnChart data={trueReturns.rollingReturnCurve} range="MAX" /> : <EmptyState text="Need at least 12 months of valid TWR history." />}
+            </Card>
+
+            <Card>
+              <div className="mb-5">
+                <h3 className="text-lg font-bold text-white">Rolling drawdown</h3>
+                <p className="mt-1 text-sm text-slate-500">Drawdown from the true-return cumulative curve, not raw deposits.</p>
+              </div>
+              {trueReturns.drawdownCurve.length > 0 ? <DrawdownCurveChart data={trueReturns.drawdownCurve} range="MAX" /> : <EmptyState text="Need more valid contribution-adjusted intervals for drawdown." />}
+            </Card>
+
+            <Card>
+              <div className="mb-5">
+                <h3 className="text-lg font-bold text-white">Benchmark relative</h3>
+                <p className="mt-1 text-sm text-slate-500">Portfolio TWR curve versus benchmark on shared valid dates.</p>
+              </div>
+              {trueReturns.benchmarkRelativeCurve.length > 0 ? <BenchmarkRelativeChart data={trueReturns.benchmarkRelativeCurve} range="MAX" /> : <EmptyState text={trueReturns.benchmarkRelativeReturn.reason ?? 'Need overlapping benchmark history.'} />}
+            </Card>
           </div>
 
           <div className="grid gap-6 2xl:grid-cols-[1fr_1fr]">
@@ -1337,7 +1387,7 @@ function PerformanceEngineSummary({
 }) {
   return (
     <div className="mt-5 grid gap-3 md:grid-cols-2">
-      <InfoLine label="Volatility est." value={metricOrReason(performance.volatilityPct, performance.volatilityReason)} />
+      <InfoLine label="Snapshot vol. est." value={metricOrReason(performance.volatilityPct, performance.volatilityReason)} />
       <InfoLine label="Snapshots" value={String(performance.snapshots.length)} />
       <InfoLine label="Realized P/L" value={PLN.format(realizedPnl)} />
       <InfoLine label="Unrealized P/L" value={PLN.format(unrealizedPnl)} />
