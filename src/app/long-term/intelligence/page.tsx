@@ -2,22 +2,28 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent, FormEvent, InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from 'react'
-import { Banknote, BarChart3, CheckCircle2, FileUp, History, Landmark, Loader2, Percent, PieChart, Plus, Save, Search, Scale, Trash2, TrendingUp, Wallet } from 'lucide-react'
-import { BenchmarkComparisonChart, MonthlyDividendChart, MonthlyReturnsChart } from '@/components/Charts'
+import { Banknote, BarChart3, CheckCircle2, FileUp, History, Loader2, Percent, Plus, Save, Search, Scale, Trash2, TrendingDown, TrendingUp } from 'lucide-react'
+import { BenchmarkComparisonChart, MonthlyDividendChart } from '@/components/Charts'
 import { Card, PageHeader, Shell, StatCard, TrustBadge } from '@/components/Shell'
 import { projectEdoBond, summarizeEdoBonds } from '@/lib/bond-engine'
 import { PLN, PCT } from '@/lib/format'
 import {
   buildAllocationDrift,
-  buildBenchmarkComparison,
   buildMonthlyDividendPoints,
-  buildMonthlyReturnPoints,
-  calculatePerformanceMetrics,
   isMarketPricedAsset,
   num,
   summarizeCashLedger,
   summarizeDividends,
 } from '@/lib/portfolio-intelligence'
+import {
+  buildBenchmarkPerformance,
+  buildPortfolioPerformance,
+  type BenchmarkPerformance,
+  type MonthlyReturnCell,
+  type PortfolioPerformance,
+  type ReturnPeriod,
+  type YearlyReturnPoint,
+} from '@/lib/portfolio-performance'
 import { buildPositions, portfolioSummary } from '@/lib/position-engine'
 import {
   CSV_IMPORT_SOURCE_LABELS,
@@ -229,6 +235,26 @@ function catalogMeta(row: InstrumentCatalogRow) {
   return `${row.provider} · ${row.category.replaceAll('_', ' ')} · ${row.currency}${row.exchange ? ` · ${row.exchange}` : ''}`
 }
 
+function periodByKey(periods: ReturnPeriod[], key: ReturnPeriod['key']) {
+  return periods.find((period) => period.key === key) ?? null
+}
+
+function periodSub(period: ReturnPeriod | null) {
+  if (!period?.available) return period?.reason ?? 'snapshot history unavailable'
+  if (!period.startDate || !period.endDate) return 'snapshot-based estimate'
+  return `${formatDate(period.startDate)} → ${formatDate(period.endDate)}`
+}
+
+function monthSub(month: MonthlyReturnCell | null) {
+  if (!month) return 'need monthly snapshots'
+  return `${month.monthLabel} ${month.year}`
+}
+
+function returnCardTone(value: number | null | undefined, available = value != null) {
+  if (!available || value == null) return 'cyan'
+  return value >= 0 ? 'emerald' : 'red'
+}
+
 export default function PortfolioIntelligencePage() {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
@@ -379,7 +405,8 @@ export default function PortfolioIntelligencePage() {
   const cashSummary = useMemo(() => summarizeCashLedger(cashEntries, baseCurrency), [cashEntries, baseCurrency])
   const dividendSummary = useMemo(() => summarizeDividends(dividendRecords, baseCurrency), [dividendRecords, baseCurrency])
   const monthlyDividends = useMemo(() => buildMonthlyDividendPoints(dividendRecords, baseCurrency), [dividendRecords, baseCurrency])
-  const monthlyReturns = useMemo(() => buildMonthlyReturnPoints(snapshots), [snapshots])
+  const performance = useMemo(() => buildPortfolioPerformance(snapshots), [snapshots])
+  const benchmarkPerformance = useMemo(() => buildBenchmarkPerformance(snapshots, benchmarkHistory), [snapshots, benchmarkHistory])
   const bondsTarget = useMemo(() => {
     const explicitTarget = assets
       .filter((asset) => asset.asset_type === 'Obligacje' || asset.symbol.toUpperCase().includes('EDO'))
@@ -390,19 +417,9 @@ export default function PortfolioIntelligencePage() {
   const transactionFees = transactions.reduce((sum, transaction) => sum + num(transaction.fees), 0)
   const bondPnl = edoSummary.currentValueAfterTax - edoSummary.principal
   const totalValue = summary.totalValue + edoSummary.currentValueAfterTax + cashSummary.cashBalanceBase
-  const totalCost = summary.remainingCost + edoSummary.principal
   const realizedPnl = summary.realizedPnl + dividendSummary.netBase - transactionFees - cashSummary.feesBase - cashSummary.taxesBase
   const unrealizedPnl = summary.unrealizedPnl + bondPnl
   const feesAndTaxes = transactionFees + cashSummary.feesBase + cashSummary.taxesBase + dividendSummary.taxBase
-  const performance = useMemo(() => calculatePerformanceMetrics({
-    snapshots,
-    currentValue: totalValue,
-    contribution: cashSummary.contributionBase,
-    fallbackCost: totalCost,
-    realizedPnl,
-    unrealizedPnl,
-  }), [snapshots, totalValue, cashSummary.contributionBase, totalCost, realizedPnl, unrealizedPnl])
-  const benchmarkComparison = useMemo(() => buildBenchmarkComparison(snapshots, benchmarkHistory), [snapshots, benchmarkHistory])
   const allocationDrift = useMemo(() => buildAllocationDrift(positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue), [positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue])
   const selectedBenchmark = assets.find((asset) => asset.id === benchmarkAssetId) ?? null
   const selectedBackfillAsset = marketAssets.find((asset) => asset.id === backfillAssetId) ?? null
@@ -413,9 +430,12 @@ export default function PortfolioIntelligencePage() {
   const csvPreview = useMemo(() => parseHistoricalPriceCsv(csvText), [csvText])
   const latestSnapshotAllocation = snapshots[snapshots.length - 1]?.allocation_breakdown ?? []
   const portfolioHistoryPoints = snapshots.filter((snapshot) => num(snapshot.total_value) > 0).length
-  const hasMonthlyReturnChartData = monthlyReturns.length >= 2
-  const singleMonthlyReturn = monthlyReturns.length === 1 ? monthlyReturns[0] : null
-  const hasBenchmarkComparisonData = benchmarkComparison.length >= 2
+  const mtdPeriod = periodByKey(performance.periods, 'MTD')
+  const ytdPeriod = periodByKey(performance.periods, 'YTD')
+  const oneYearPeriod = periodByKey(performance.periods, '1Y')
+  const threeYearPeriod = periodByKey(performance.periods, '3Y')
+  const maxPeriod = periodByKey(performance.periods, 'MAX')
+  const singleMonthlyReturn = performance.monthlyReturns.length === 1 ? performance.monthlyReturns[0] : null
 
   async function handleCashSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -706,17 +726,17 @@ export default function PortfolioIntelligencePage() {
       {activeTab === 'overview' ? (
         <div className="space-y-6">
           <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-            <StatCard icon={TrendingUp} label="Total return" value={PLN.format(performance.totalReturnAmount)} sub={formatPct(performance.totalReturnPct)} tone={performance.totalReturnAmount >= 0 ? 'emerald' : 'red'} />
-            <StatCard icon={Banknote} label="Realized P/L" value={PLN.format(performance.realizedPnl)} sub="sprzedaże + dywidendy netto - koszty" tone={performance.realizedPnl >= 0 ? 'emerald' : 'red'} />
-            <StatCard icon={PieChart} label="Unrealized P/L" value={PLN.format(performance.unrealizedPnl)} sub="pozycje + EDO" tone={performance.unrealizedPnl >= 0 ? 'emerald' : 'red'} />
-            <StatCard icon={Wallet} label="Contribution" value={PLN.format(performance.contribution)} sub={`ledger ${baseCurrency}`} tone="violet" />
+            <StatCard icon={Percent} label="MTD return" value={formatPct(mtdPeriod?.returnPct ?? null)} sub={periodSub(mtdPeriod)} tone={returnCardTone(mtdPeriod?.returnPct, mtdPeriod?.available)} />
+            <StatCard icon={BarChart3} label="YTD return" value={formatPct(ytdPeriod?.returnPct ?? null)} sub={periodSub(ytdPeriod)} tone={returnCardTone(ytdPeriod?.returnPct, ytdPeriod?.available)} />
+            <StatCard icon={TrendingUp} label="1Y return" value={formatPct(oneYearPeriod?.returnPct ?? null)} sub={periodSub(oneYearPeriod)} tone={returnCardTone(oneYearPeriod?.returnPct, oneYearPeriod?.available)} />
+            <StatCard icon={TrendingUp} label="3Y return" value={formatPct(threeYearPeriod?.returnPct ?? null)} sub={periodSub(threeYearPeriod)} tone={returnCardTone(threeYearPeriod?.returnPct, threeYearPeriod?.available)} />
           </div>
 
           <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-            <StatCard icon={Percent} label="Monthly return" value={formatPct(performance.monthlyReturnPct)} sub="estimate z snapshots" tone={(performance.monthlyReturnPct ?? 0) >= 0 ? 'emerald' : 'red'} />
-            <StatCard icon={BarChart3} label="YTD return" value={formatPct(performance.ytdReturnPct)} sub="estimate z snapshots" tone={(performance.ytdReturnPct ?? 0) >= 0 ? 'emerald' : 'red'} />
-            <StatCard icon={Scale} label="Max drawdown" value={formatPct(performance.maxDrawdownPct)} sub={snapshots.length >= 2 ? 'z portfolio_snapshots' : 'potrzeba historii'} tone="red" />
-            <StatCard icon={Landmark} label="Fees / taxes" value={PLN.format(feesAndTaxes)} sub="fees transakcyjne + tax ledger" tone="cyan" />
+            <StatCard icon={Scale} label="MAX return" value={formatPct(maxPeriod?.returnPct ?? null)} sub={periodSub(maxPeriod)} tone={returnCardTone(maxPeriod?.returnPct, maxPeriod?.available)} />
+            <StatCard icon={TrendingDown} label="Max drawdown" value={formatPct(performance.maxDrawdownPct)} sub={performance.maxDrawdownDate ? formatDate(performance.maxDrawdownDate) : 'need history'} tone="red" />
+            <StatCard icon={TrendingUp} label="Best month" value={formatPct(performance.bestMonth?.returnPct ?? null)} sub={monthSub(performance.bestMonth)} tone="emerald" />
+            <StatCard icon={TrendingDown} label="Worst month" value={formatPct(performance.worstMonth?.returnPct ?? null)} sub={monthSub(performance.worstMonth)} tone="red" />
           </div>
 
           <div className="grid gap-6 2xl:grid-cols-[1fr_1fr]">
@@ -724,28 +744,33 @@ export default function PortfolioIntelligencePage() {
               <div className="mb-5 flex items-center justify-between gap-4">
                 <div>
                   <h3 className="text-lg font-bold text-white">Monthly returns</h3>
-                  <p className="mt-1 text-sm text-slate-500">Prosty zwrot m/m z `portfolio_snapshots`, korygowany o zmianę contribution.</p>
+                  <p className="mt-1 text-sm text-slate-500">Snapshot-based estimated monthly returns, grouped by year and adjusted for contribution changes.</p>
                 </div>
                 <TrustBadge>Estimated</TrustBadge>
               </div>
-              {hasMonthlyReturnChartData ? (
-                <>
-                  <MonthlyReturnsChart data={monthlyReturns} range="MAX" />
-                  <MonthlyReturnsTable rows={monthlyReturns} />
-                </>
+              {performance.monthlyReturns.length >= 2 ? (
+                <MonthlyReturnsGrid rows={performance.monthlyReturns} />
               ) : singleMonthlyReturn ? (
                 <SingleMonthlyReturnSummary row={singleMonthlyReturn} />
               ) : (
                 <EmptyState text={portfolioHistoryPoints < 2 ? 'Not enough portfolio history yet. Run portfolio historical valuation backfill.' : 'Need more monthly snapshots before monthly returns are meaningful.'} />
               )}
+              <PerformanceEngineSummary performance={performance} realizedPnl={realizedPnl} unrealizedPnl={unrealizedPnl} feesAndTaxes={feesAndTaxes} baseCurrency={baseCurrency} />
             </Card>
 
             <Card>
               <div className="mb-5">
                 <h3 className="text-lg font-bold text-white">Portfolio vs benchmark</h3>
-                <p className="mt-1 text-sm text-slate-500">Indeks 100 = pierwszy wspólny punkt historii.</p>
+                <p className="mt-1 text-sm text-slate-500">Common-overlap indexed comparison. Index 100 = first shared snapshot/benchmark point.</p>
               </div>
-              {hasBenchmarkComparisonData ? <BenchmarkComparisonChart data={benchmarkComparison} range="MAX" /> : <EmptyState text="Not enough overlapping portfolio and benchmark history yet. Run portfolio historical valuation backfill and make sure the benchmark has market_prices." />}
+              {benchmarkPerformance.available ? (
+                <>
+                  <BenchmarkSummary result={benchmarkPerformance} />
+                  <BenchmarkComparisonChart data={benchmarkPerformance.points} range="MAX" />
+                </>
+              ) : (
+                <EmptyState text={benchmarkPerformance.message ?? 'Not enough overlapping portfolio and benchmark history yet. Run portfolio historical valuation backfill and make sure the benchmark has market_prices.'} />
+              )}
             </Card>
           </div>
         </div>
@@ -860,7 +885,12 @@ export default function PortfolioIntelligencePage() {
           <Card>
             <h3 className="text-lg font-bold text-white">Portfolio vs benchmark</h3>
             <p className="mt-1 text-sm text-slate-500">Porównanie bazowane do 100 na pierwszym wspólnym punkcie.</p>
-            {hasBenchmarkComparisonData ? <BenchmarkComparisonChart data={benchmarkComparison} range="MAX" /> : <EmptyState text="Potrzeba co najmniej dwóch wspólnych punktów historii portfolio_snapshots oraz market_prices dla benchmarku." />}
+            {benchmarkPerformance.available ? (
+              <>
+                <BenchmarkSummary result={benchmarkPerformance} />
+                <BenchmarkComparisonChart data={benchmarkPerformance.points} range="MAX" />
+              </>
+            ) : <EmptyState text={benchmarkPerformance.message ?? 'Potrzeba co najmniej dwóch wspólnych punktów historii portfolio_snapshots oraz market_prices dla benchmarku.'} />}
           </Card>
         </div>
       ) : null}
@@ -1120,29 +1150,6 @@ function DividendTable({ rows, onDelete, saving }: { rows: DividendRecord[]; onD
   )
 }
 
-function MonthlyReturnsTable({ rows }: { rows: { month: string; startValue: number; endValue: number; cashFlow: number; returnPct: number }[] }) {
-  return (
-    <div className="mt-5 overflow-hidden rounded-2xl border border-white/10">
-      <table className="w-full text-sm">
-        <thead className="bg-white/[0.04] text-slate-500">
-          <tr><th className="p-3 text-left">Month</th><th className="p-3 text-right">Start</th><th className="p-3 text-right">End</th><th className="p-3 text-right">Flow</th><th className="p-3 text-right">Return</th></tr>
-        </thead>
-        <tbody>
-          {rows.slice(-6).map((row) => (
-            <tr key={row.month} className="border-t border-white/10 text-slate-300">
-              <td className="p-3">{row.month}</td>
-              <td className="p-3 text-right">{PLN.format(row.startValue)}</td>
-              <td className="p-3 text-right">{PLN.format(row.endValue)}</td>
-              <td className="p-3 text-right">{PLN.format(row.cashFlow)}</td>
-              <td className={`p-3 text-right font-semibold ${row.returnPct >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>{PCT.format(row.returnPct)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
 function AllocationDriftTable({ rows }: { rows: ReturnType<typeof buildAllocationDrift> }) {
   if (rows.length === 0) return <EmptyState text="Brak aktywów lub targetów do policzenia driftu." />
   return (
@@ -1254,7 +1261,106 @@ function BackfillResultPanel({ result, loading }: { result: BackfillResult | nul
   )
 }
 
-function SingleMonthlyReturnSummary({ row }: { row: { date: string; month: string; startValue: number; endValue: number; cashFlow: number; returnPct: number } }) {
+function returnTone(value: number | null | undefined) {
+  if (value == null) return 'bg-white/[0.04] text-slate-400'
+  if (value >= 0.05) return 'bg-emerald-500/25 text-emerald-100'
+  if (value >= 0) return 'bg-emerald-500/10 text-emerald-200'
+  if (value <= -0.05) return 'bg-rose-500/25 text-rose-100'
+  return 'bg-rose-500/10 text-rose-200'
+}
+
+function MonthlyReturnsGrid({ rows }: { rows: MonthlyReturnCell[] }) {
+  const byYear = new Map<string, MonthlyReturnCell[]>()
+  for (const row of rows) {
+    const current = byYear.get(row.year) ?? []
+    current.push(row)
+    byYear.set(row.year, current)
+  }
+
+  return (
+    <div className="space-y-4">
+      {Array.from(byYear.entries()).map(([year, yearRows]) => {
+        const byMonth = new Map(yearRows.map((row) => [row.month, row]))
+        return (
+          <div key={year} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-white">{year}</p>
+              <p className="text-xs text-slate-500">{yearRows.length} monthly estimates</p>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-6">
+              {Array.from({ length: 12 }, (_, index) => {
+                const month = index + 1
+                const row = byMonth.get(month)
+                return (
+                  <div key={`${year}-${month}`} className={`rounded-xl p-3 text-sm ${returnTone(row?.returnPct)}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold opacity-80">{row?.monthLabel ?? month}</span>
+                      <span className="font-bold">{row ? PCT.format(row.returnPct) : '—'}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function YearlyReturnsList({ rows }: { rows: YearlyReturnPoint[] }) {
+  if (rows.length === 0) return <InfoLine label="Yearly returns" value="Need more snapshots" />
+  const latest = rows.slice(-3)
+  return (
+    <div className="space-y-2">
+      {latest.map((row) => <InfoLine key={row.year} label={row.year} value={PCT.format(row.returnPct)} />)}
+    </div>
+  )
+}
+
+function PerformanceEngineSummary({
+  performance,
+  realizedPnl,
+  unrealizedPnl,
+  feesAndTaxes,
+  baseCurrency,
+}: {
+  performance: PortfolioPerformance
+  realizedPnl: number
+  unrealizedPnl: number
+  feesAndTaxes: number
+  baseCurrency: SupportedCashCurrency
+}) {
+  return (
+    <div className="mt-5 grid gap-3 md:grid-cols-2">
+      <InfoLine label="Volatility est." value={formatPct(performance.volatilityPct)} />
+      <InfoLine label="Snapshots" value={String(performance.snapshots.length)} />
+      <InfoLine label="Realized P/L" value={PLN.format(realizedPnl)} />
+      <InfoLine label="Unrealized P/L" value={PLN.format(unrealizedPnl)} />
+      <InfoLine label="Fees / taxes" value={PLN.format(feesAndTaxes)} />
+      <InfoLine label="Base currency" value={baseCurrency} />
+      <div className="md:col-span-2">
+        <YearlyReturnsList rows={performance.yearlyReturns} />
+      </div>
+    </div>
+  )
+}
+
+function BenchmarkSummary({ result }: { result: BenchmarkPerformance }) {
+  return (
+    <div className="mb-5 grid gap-3 md:grid-cols-4">
+      <InfoLine label="Overlap" value={result.overlapStartDate && result.overlapEndDate ? `${formatDate(result.overlapStartDate)} → ${formatDate(result.overlapEndDate)}` : '—'} />
+      <InfoLine label="Portfolio" value={formatPct(result.portfolioReturnPct)} />
+      <InfoLine label="Benchmark" value={formatPct(result.benchmarkReturnPct)} />
+      <InfoLine label="Relative" value={formatPct(result.relativeReturnPct)} />
+      <div className="md:col-span-4">
+        <InfoLine label="Tracking diff est." value={formatPct(result.trackingDifferencePct)} />
+      </div>
+    </div>
+  )
+}
+
+function SingleMonthlyReturnSummary({ row }: { row: MonthlyReturnCell }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -1267,8 +1373,8 @@ function SingleMonthlyReturnSummary({ row }: { row: { date: string; month: strin
         </span>
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-4">
-        <InfoLine label="Month" value={row.month} />
-        <InfoLine label="Date" value={formatDate(row.date)} />
+        <InfoLine label="Month" value={`${row.monthLabel} ${row.year}`} />
+        <InfoLine label="Date" value={formatDate(row.endDate)} />
         <InfoLine label="Start" value={PLN.format(row.startValue)} />
         <InfoLine label="End" value={PLN.format(row.endValue)} />
       </div>
