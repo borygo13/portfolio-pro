@@ -28,6 +28,7 @@ export type MonthlyReturnCell = {
   startValue: number
   endValue: number
   cashFlow: number
+  observationCount: number
   returnPct: number
 }
 
@@ -54,7 +55,10 @@ export type PortfolioPerformance = {
   totalReturnPct: number | null
   maxDrawdownPct: number | null
   maxDrawdownDate: string | null
+  maxDrawdownReason: string | null
   volatilityPct: number | null
+  volatilityReason: string | null
+  indexedSeriesReason: string | null
   bestMonth: MonthlyReturnCell | null
   worstMonth: MonthlyReturnCell | null
 }
@@ -78,6 +82,27 @@ export type BenchmarkPerformance = {
   message?: string
 }
 
+type IntervalReturn = {
+  valid: boolean
+  startDate: string
+  endDate: string
+  startValue: number
+  endValue: number
+  cashFlow: number
+  returnPct: number | null
+  reason?: string
+}
+
+type ChainedReturnResult = {
+  available: boolean
+  returnPct: number | null
+  startDate: string | null
+  endDate: string | null
+  observationCount: number
+  cashFlow: number
+  reason?: string
+}
+
 const PERIODS: { key: ReturnPeriodKey; label: string }[] = [
   { key: 'MTD', label: 'MTD' },
   { key: 'YTD', label: 'YTD' },
@@ -88,6 +113,16 @@ const PERIODS: { key: ReturnPeriodKey; label: string }[] = [
 
 const MONTH_LABELS = ['Sty', 'Lut', 'Mar', 'Kwi', 'Maj', 'Cze', 'Lip', 'Sie', 'Wrz', 'Paź', 'Lis', 'Gru']
 const DAY_MS = 24 * 60 * 60 * 1000
+const EPS = 0.000001
+const MIN_RETURN_BASE = 100
+const MIN_INDEXED_OBSERVATIONS = 10
+const MIN_DRAWDOWN_POINTS = 30
+const MIN_VOLATILITY_OBSERVATIONS = 30
+const MAX_INTERVAL_RETURN = 0.5
+const MAX_MONTHLY_RETURN = 1.5
+const MAX_PERIOD_RETURN = 5
+const MAX_INVALID_INTERVAL_RATIO = 0.25
+const MIN_BENCHMARK_OVERLAP_DAYS = 30
 
 function n(value: unknown) {
   const parsed = Number(value ?? 0)
@@ -126,16 +161,82 @@ function yearKey(date: string) {
 }
 
 function daysBetween(start: string, end: string) {
-  return Math.max(0, (new Date(`${end}T00:00:00`).getTime() - new Date(`${start}T00:00:00`).getTime()) / DAY_MS)
+  const startTime = new Date(`${start}T00:00:00`).getTime()
+  const endTime = new Date(`${end}T00:00:00`).getTime()
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return 0
+  return Math.max(0, (endTime - startTime) / DAY_MS)
 }
 
-function snapshotReturn(start: PortfolioSnapshot, end: PortfolioSnapshot) {
+function cashFlowBetween(start: PortfolioSnapshot, end: PortfolioSnapshot) {
+  const contributionDelta = n(end.contribution) - n(start.contribution)
+  if (Math.abs(contributionDelta) > EPS) return contributionDelta
+
+  const netCashFlow = n(end.net_cash_flow)
+  if (Math.abs(netCashFlow) > EPS) return netCashFlow
+
+  const investedCostDelta = n(end.invested_cost) - n(start.invested_cost)
+  if (Math.abs(investedCostDelta) > EPS) return investedCostDelta
+
+  return 0
+}
+
+function intervalReturn(start: PortfolioSnapshot, end: PortfolioSnapshot): IntervalReturn {
   const startValue = n(start.total_value)
   const endValue = n(end.total_value)
-  if (startValue <= 0 || endValue <= 0 || start.snapshot_date === end.snapshot_date) return null
-  const cashFlow = n(end.contribution) - n(start.contribution)
-  const value = (endValue - startValue - cashFlow) / startValue
-  return Number.isFinite(value) ? value : null
+  const cashFlow = cashFlowBetween(start, end)
+
+  if (start.snapshot_date === end.snapshot_date) {
+    return { valid: false, startDate: start.snapshot_date, endDate: end.snapshot_date, startValue, endValue, cashFlow, returnPct: null, reason: 'Duplicate snapshot date.' }
+  }
+  if (startValue <= 0 || endValue <= 0) {
+    return { valid: false, startDate: start.snapshot_date, endDate: end.snapshot_date, startValue, endValue, cashFlow, returnPct: null, reason: 'Portfolio value is missing.' }
+  }
+
+  const base = startValue + cashFlow * 0.5
+  if (base < MIN_RETURN_BASE) {
+    return { valid: false, startDate: start.snapshot_date, endDate: end.snapshot_date, startValue, endValue, cashFlow, returnPct: null, reason: 'Starting portfolio value is too low.' }
+  }
+
+  const returnPct = (endValue - startValue - cashFlow) / base
+  if (!Number.isFinite(returnPct)) {
+    return { valid: false, startDate: start.snapshot_date, endDate: end.snapshot_date, startValue, endValue, cashFlow, returnPct: null, reason: 'Return is not finite.' }
+  }
+  if (Math.abs(returnPct) > MAX_INTERVAL_RETURN) {
+    return { valid: false, startDate: start.snapshot_date, endDate: end.snapshot_date, startValue, endValue, cashFlow, returnPct: null, reason: 'Interval return was suppressed by safety guard.' }
+  }
+
+  return { valid: true, startDate: start.snapshot_date, endDate: end.snapshot_date, startValue, endValue, cashFlow, returnPct }
+}
+
+function buildIntervals(snapshots: PortfolioSnapshot[]) {
+  const intervals: IntervalReturn[] = []
+  for (let index = 1; index < snapshots.length; index += 1) {
+    intervals.push(intervalReturn(snapshots[index - 1], snapshots[index]))
+  }
+  return intervals
+}
+
+function minObservationsForPeriod(key: ReturnPeriodKey) {
+  if (key === 'MTD') return 2
+  if (key === 'YTD') return 8
+  if (key === '1Y') return 20
+  if (key === '3Y') return 40
+  return 10
+}
+
+function minSpanForPeriod(key: ReturnPeriodKey) {
+  if (key === 'MTD') return 2
+  if (key === 'YTD') return 14
+  if (key === '1Y') return 180
+  if (key === '3Y') return 365
+  return 14
+}
+
+function periodCoverageToleranceDays(key: ReturnPeriodKey) {
+  if (key === 'MTD') return 7
+  if (key === 'YTD') return 31
+  if (key === '1Y' || key === '3Y') return 45
+  return 0
 }
 
 function periodStart(key: ReturnPeriodKey, endDate: string) {
@@ -147,15 +248,46 @@ function periodStart(key: ReturnPeriodKey, endDate: string) {
   return formatDate(addYears(end, -3))
 }
 
-function periodCoverageToleranceDays(key: ReturnPeriodKey) {
-  if (key === 'MTD') return 7
-  if (key === 'YTD') return 31
-  if (key === '1Y' || key === '3Y') return 45
-  return 0
+function firstIndexOnOrAfter(snapshots: PortfolioSnapshot[], date: string) {
+  const index = snapshots.findIndex((snapshot) => snapshot.snapshot_date >= date)
+  return index >= 0 ? index : null
 }
 
-function firstOnOrAfter(snapshots: PortfolioSnapshot[], date: string) {
-  return snapshots.find((snapshot) => snapshot.snapshot_date >= date) ?? null
+function chainIntervals(intervals: IntervalReturn[], maxAbsReturn: number): ChainedReturnResult {
+  if (intervals.length === 0) {
+    return { available: false, returnPct: null, startDate: null, endDate: null, observationCount: 0, cashFlow: 0, reason: 'Need more portfolio snapshots.' }
+  }
+
+  const valid = intervals.filter((interval) => interval.valid && interval.returnPct != null)
+  const invalidRatio = (intervals.length - valid.length) / intervals.length
+  if (valid.length === 0) {
+    return { available: false, returnPct: null, startDate: null, endDate: null, observationCount: 0, cashFlow: 0, reason: intervals[0]?.reason ?? 'No valid contribution-adjusted intervals.' }
+  }
+  if (invalidRatio > MAX_INVALID_INTERVAL_RATIO) {
+    return { available: false, returnPct: null, startDate: valid[0].startDate, endDate: valid[valid.length - 1].endDate, observationCount: valid.length, cashFlow: valid.reduce((sum, item) => sum + item.cashFlow, 0), reason: 'Too many sparse or cash-flow-dominated intervals.' }
+  }
+
+  let cumulative = 1
+  for (const interval of valid) {
+    cumulative *= 1 + (interval.returnPct ?? 0)
+  }
+
+  const returnPct = cumulative - 1
+  if (!Number.isFinite(returnPct)) {
+    return { available: false, returnPct: null, startDate: valid[0].startDate, endDate: valid[valid.length - 1].endDate, observationCount: valid.length, cashFlow: valid.reduce((sum, item) => sum + item.cashFlow, 0), reason: 'Return is not finite.' }
+  }
+  if (Math.abs(returnPct) > maxAbsReturn) {
+    return { available: false, returnPct: null, startDate: valid[0].startDate, endDate: valid[valid.length - 1].endDate, observationCount: valid.length, cashFlow: valid.reduce((sum, item) => sum + item.cashFlow, 0), reason: 'Return suppressed because the estimate is too extreme.' }
+  }
+
+  return {
+    available: true,
+    returnPct,
+    startDate: valid[0].startDate,
+    endDate: valid[valid.length - 1].endDate,
+    observationCount: valid.length,
+    cashFlow: valid.reduce((sum, item) => sum + item.cashFlow, 0),
+  }
 }
 
 function periodReturn(snapshots: PortfolioSnapshot[], key: ReturnPeriodKey): ReturnPeriod {
@@ -166,48 +298,79 @@ function periodReturn(snapshots: PortfolioSnapshot[], key: ReturnPeriodKey): Ret
 
   const latest = snapshots[snapshots.length - 1]
   const requestedStart = periodStart(key, latest.snapshot_date)
-  const start = requestedStart ? firstOnOrAfter(snapshots, requestedStart) : snapshots[0]
-  if (!start || start.snapshot_date === latest.snapshot_date) {
-    return { ...meta, available: false, returnPct: null, startDate: start?.snapshot_date ?? requestedStart, endDate: latest.snapshot_date, reason: 'Not enough snapshots in this period.' }
+  const startIndex = requestedStart ? firstIndexOnOrAfter(snapshots, requestedStart) : 0
+  if (startIndex == null || startIndex >= snapshots.length - 1) {
+    return { ...meta, available: false, returnPct: null, startDate: requestedStart, endDate: latest.snapshot_date, reason: 'Not enough snapshots in this period.' }
   }
-  if (requestedStart && daysBetween(requestedStart, start.snapshot_date) > periodCoverageToleranceDays(key)) {
+
+  const periodSnapshots = snapshots.slice(startIndex)
+  const actualStart = periodSnapshots[0]
+  if (requestedStart && daysBetween(requestedStart, actualStart.snapshot_date) > periodCoverageToleranceDays(key)) {
     return {
       ...meta,
       available: false,
       returnPct: null,
-      startDate: start.snapshot_date,
+      startDate: actualStart.snapshot_date,
       endDate: latest.snapshot_date,
       reason: `Need snapshots closer to ${requestedStart}.`,
     }
   }
 
-  const returnPct = snapshotReturn(start, latest)
+  const chained = chainIntervals(buildIntervals(periodSnapshots), MAX_PERIOD_RETURN)
+  if (!chained.available) {
+    return { ...meta, available: false, returnPct: null, startDate: chained.startDate ?? actualStart.snapshot_date, endDate: chained.endDate ?? latest.snapshot_date, reason: chained.reason }
+  }
+  if (chained.observationCount < minObservationsForPeriod(key)) {
+    return { ...meta, available: false, returnPct: null, startDate: chained.startDate, endDate: chained.endDate, reason: 'Need more valid return observations.' }
+  }
+  if (chained.startDate && chained.endDate && daysBetween(chained.startDate, chained.endDate) < minSpanForPeriod(key)) {
+    return { ...meta, available: false, returnPct: null, startDate: chained.startDate, endDate: chained.endDate, reason: 'Snapshot history is too short for this period.' }
+  }
+
   return {
     ...meta,
-    available: returnPct != null,
-    returnPct,
-    startDate: start.snapshot_date,
-    endDate: latest.snapshot_date,
-    reason: returnPct == null ? 'Period return is unavailable.' : undefined,
+    available: true,
+    returnPct: chained.returnPct,
+    startDate: chained.startDate,
+    endDate: chained.endDate,
   }
 }
 
-function indexedSeries(snapshots: PortfolioSnapshot[]): IndexedReturnPoint[] {
-  if (snapshots.length === 0) return []
-  const first = snapshots[0]
-  const baseValue = n(first.total_value)
-  const baseContribution = n(first.contribution)
-  if (baseValue <= 0) return []
+function linkedSeries(snapshots: PortfolioSnapshot[]): { points: IndexedReturnPoint[]; intervals: IntervalReturn[]; reason: string | null } {
+  const intervals = buildIntervals(snapshots)
+  if (intervals.length < MIN_INDEXED_OBSERVATIONS) {
+    return { points: [], intervals, reason: 'Need more portfolio snapshots.' }
+  }
 
-  return snapshots.flatMap((snapshot) => {
-    const adjustedReturn = (n(snapshot.total_value) - baseValue - (n(snapshot.contribution) - baseContribution)) / baseValue
-    if (!Number.isFinite(adjustedReturn)) return []
-    return [{
-      date: snapshot.snapshot_date,
-      label: dateLabel(snapshot.snapshot_date),
-      portfolio: (1 + adjustedReturn) * 100,
-    }]
-  })
+  const valid = intervals.filter((interval) => interval.valid && interval.returnPct != null)
+  const invalidRatio = (intervals.length - valid.length) / intervals.length
+  if (valid.length < MIN_INDEXED_OBSERVATIONS) {
+    return { points: [], intervals, reason: 'Need more valid contribution-adjusted intervals.' }
+  }
+  if (invalidRatio > MAX_INVALID_INTERVAL_RATIO) {
+    return { points: [], intervals, reason: 'History is too sparse or cash-flow dominated.' }
+  }
+
+  let indexValue = 100
+  const points: IndexedReturnPoint[] = [{
+    date: valid[0].startDate,
+    label: dateLabel(valid[0].startDate),
+    portfolio: 100,
+  }]
+
+  for (const interval of valid) {
+    indexValue *= 1 + (interval.returnPct ?? 0)
+    if (!Number.isFinite(indexValue) || indexValue <= 0 || indexValue > (1 + MAX_PERIOD_RETURN) * 100) {
+      return { points: [], intervals, reason: 'Indexed return estimate was suppressed by safety guard.' }
+    }
+    points.push({
+      date: interval.endDate,
+      label: dateLabel(interval.endDate),
+      portfolio: indexValue,
+    })
+  }
+
+  return { points, intervals, reason: null }
 }
 
 function monthlyReturns(snapshots: PortfolioSnapshot[]): MonthlyReturnCell[] {
@@ -220,23 +383,22 @@ function monthlyReturns(snapshots: PortfolioSnapshot[]): MonthlyReturnCell[] {
   }
 
   return Array.from(byMonth.entries()).flatMap(([key, items]) => {
-    if (items.length < 2) return []
-    const start = items[0]
-    const end = items[items.length - 1]
-    const returnPct = snapshotReturn(start, end)
-    if (returnPct == null) return []
+    if (items.length < 3 || daysBetween(items[0].snapshot_date, items[items.length - 1].snapshot_date) < 7) return []
+    const result = chainIntervals(buildIntervals(items), MAX_MONTHLY_RETURN)
+    if (!result.available || result.observationCount < 2 || result.returnPct == null) return []
     const month = Number(key.slice(5, 7))
     return [{
       key,
       year: key.slice(0, 4),
       month,
       monthLabel: MONTH_LABELS[month - 1] ?? key,
-      startDate: start.snapshot_date,
-      endDate: end.snapshot_date,
-      startValue: n(start.total_value),
-      endValue: n(end.total_value),
-      cashFlow: n(end.contribution) - n(start.contribution),
-      returnPct,
+      startDate: result.startDate ?? items[0].snapshot_date,
+      endDate: result.endDate ?? items[items.length - 1].snapshot_date,
+      startValue: n(items[0].total_value),
+      endValue: n(items[items.length - 1].total_value),
+      cashFlow: result.cashFlow,
+      observationCount: result.observationCount,
+      returnPct: result.returnPct,
     }]
   })
 }
@@ -251,16 +413,18 @@ function yearlyReturns(snapshots: PortfolioSnapshot[]): YearlyReturnPoint[] {
   }
 
   return Array.from(byYear.entries()).flatMap(([year, items]) => {
-    if (items.length < 2) return []
-    const start = items[0]
-    const end = items[items.length - 1]
-    const returnPct = snapshotReturn(start, end)
-    if (returnPct == null) return []
-    return [{ year, startDate: start.snapshot_date, endDate: end.snapshot_date, returnPct }]
+    if (items.length < 10 || daysBetween(items[0].snapshot_date, items[items.length - 1].snapshot_date) < 30) return []
+    const result = chainIntervals(buildIntervals(items), MAX_PERIOD_RETURN)
+    if (!result.available || result.returnPct == null) return []
+    return [{ year, startDate: result.startDate ?? items[0].snapshot_date, endDate: result.endDate ?? items[items.length - 1].snapshot_date, returnPct: result.returnPct }]
   })
 }
 
 function drawdowns(series: IndexedReturnPoint[]) {
+  if (series.length < MIN_DRAWDOWN_POINTS) {
+    return { points: [], maxDrawdownPct: null, maxDrawdownDate: null, reason: 'Need more valid portfolio history for drawdown.' }
+  }
+
   let peak = 0
   let maxDrawdownPct: number | null = null
   let maxDrawdownDate: string | null = null
@@ -269,6 +433,9 @@ function drawdowns(series: IndexedReturnPoint[]) {
   for (const point of series) {
     peak = Math.max(peak, point.portfolio)
     const drawdownPct = peak > 0 ? point.portfolio / peak - 1 : 0
+    if (!Number.isFinite(drawdownPct)) {
+      return { points: [], maxDrawdownPct: null, maxDrawdownDate: null, reason: 'Drawdown estimate is not finite.' }
+    }
     points.push({ date: point.date, label: point.label, drawdownPct })
     if (maxDrawdownPct == null || drawdownPct < maxDrawdownPct) {
       maxDrawdownPct = drawdownPct
@@ -276,44 +443,50 @@ function drawdowns(series: IndexedReturnPoint[]) {
     }
   }
 
-  return { points, maxDrawdownPct, maxDrawdownDate }
+  return { points, maxDrawdownPct, maxDrawdownDate, reason: null }
 }
 
-function volatility(series: IndexedReturnPoint[]) {
-  if (series.length < 10) return null
-  const returns: number[] = []
-  for (let i = 1; i < series.length; i += 1) {
-    const previous = series[i - 1].portfolio
-    const current = series[i].portfolio
-    if (previous > 0) returns.push(current / previous - 1)
+function volatility(intervals: IntervalReturn[]) {
+  const returns = intervals.flatMap((interval) => interval.valid && interval.returnPct != null ? [interval.returnPct] : [])
+  if (returns.length < MIN_VOLATILITY_OBSERVATIONS) {
+    return { value: null, reason: 'Need more valid return observations.' }
   }
-  if (returns.length < 10) return null
 
   const average = returns.reduce((sum, value) => sum + value, 0) / returns.length
   const variance = returns.reduce((sum, value) => sum + (value - average) ** 2, 0) / (returns.length - 1)
   const daily = Math.sqrt(Math.max(0, variance))
-  return Number.isFinite(daily) ? daily * Math.sqrt(252) : null
+  const annualized = Number.isFinite(daily) ? daily * Math.sqrt(252) : null
+  if (annualized == null || annualized > 5) {
+    return { value: null, reason: 'Volatility suppressed because the estimate is too extreme.' }
+  }
+
+  return { value: annualized, reason: null }
 }
 
 export function buildPortfolioPerformance(snapshots: PortfolioSnapshot[]): PortfolioPerformance {
   const sorted = sortSnapshots(snapshots)
-  const series = indexedSeries(sorted)
+  const linked = linkedSeries(sorted)
   const monthly = monthlyReturns(sorted)
-  const drawdown = drawdowns(series)
+  const drawdown = drawdowns(linked.points)
+  const vol = volatility(linked.intervals)
   const bestMonth = monthly.length > 0 ? monthly.reduce((best, item) => item.returnPct > best.returnPct ? item : best, monthly[0]) : null
   const worstMonth = monthly.length > 0 ? monthly.reduce((worst, item) => item.returnPct < worst.returnPct ? item : worst, monthly[0]) : null
+  const periods = PERIODS.map((period) => periodReturn(sorted, period.key))
 
   return {
     snapshots: sorted,
-    indexedSeries: series,
+    indexedSeries: linked.points,
     drawdownSeries: drawdown.points,
-    periods: PERIODS.map((period) => periodReturn(sorted, period.key)),
+    periods,
     monthlyReturns: monthly,
     yearlyReturns: yearlyReturns(sorted),
-    totalReturnPct: periodReturn(sorted, 'MAX').returnPct,
+    totalReturnPct: periods.find((period) => period.key === 'MAX')?.returnPct ?? null,
     maxDrawdownPct: drawdown.maxDrawdownPct,
     maxDrawdownDate: drawdown.maxDrawdownDate,
-    volatilityPct: volatility(series),
+    maxDrawdownReason: linked.reason ?? drawdown.reason,
+    volatilityPct: vol.value,
+    volatilityReason: linked.reason ?? vol.reason,
+    indexedSeriesReason: linked.reason,
     bestMonth,
     worstMonth,
   }
@@ -333,13 +506,26 @@ function closestBenchmarkPoint(history: MarketPriceHistoryPoint[], date: string,
 }
 
 export function buildBenchmarkPerformance(snapshots: PortfolioSnapshot[], benchmarkHistory: MarketPriceHistoryPoint[]): BenchmarkPerformance {
-  const sortedSnapshots = sortSnapshots(snapshots)
+  const portfolio = linkedSeries(sortSnapshots(snapshots))
   const sortedBenchmark = benchmarkHistory
     .filter((point) => benchmarkValue(point) != null)
     .slice()
     .sort((a, b) => a.price_date.localeCompare(b.price_date))
 
-  if (sortedSnapshots.length < 2 || sortedBenchmark.length < 2) {
+  if (portfolio.reason) {
+    return {
+      available: false,
+      points: [],
+      overlapStartDate: null,
+      overlapEndDate: null,
+      portfolioReturnPct: null,
+      benchmarkReturnPct: null,
+      relativeReturnPct: null,
+      trackingDifferencePct: null,
+      message: portfolio.reason,
+    }
+  }
+  if (portfolio.points.length < 2 || sortedBenchmark.length < 2) {
     return {
       available: false,
       points: [],
@@ -353,24 +539,24 @@ export function buildBenchmarkPerformance(snapshots: PortfolioSnapshot[], benchm
     }
   }
 
-  const matched: { snapshot: PortfolioSnapshot; benchmark: MarketPriceHistoryPoint; benchmarkPrice: number }[] = []
+  const matched: { point: IndexedReturnPoint; benchmark: MarketPriceHistoryPoint; benchmarkPrice: number }[] = []
   let benchmarkIndex = 0
 
-  for (const snapshot of sortedSnapshots) {
-    const match = closestBenchmarkPoint(sortedBenchmark, snapshot.snapshot_date, benchmarkIndex)
+  for (const point of portfolio.points) {
+    const match = closestBenchmarkPoint(sortedBenchmark, point.date, benchmarkIndex)
     benchmarkIndex = match.index
     if (!match.point) continue
     const price = benchmarkValue(match.point)
     if (price == null) continue
-    matched.push({ snapshot, benchmark: match.point, benchmarkPrice: price })
+    matched.push({ point, benchmark: match.point, benchmarkPrice: price })
   }
 
   if (matched.length < 2) {
     return {
       available: false,
       points: [],
-      overlapStartDate: matched[0]?.snapshot.snapshot_date ?? null,
-      overlapEndDate: matched[matched.length - 1]?.snapshot.snapshot_date ?? null,
+      overlapStartDate: matched[0]?.point.date ?? null,
+      overlapEndDate: matched[matched.length - 1]?.point.date ?? null,
       portfolioReturnPct: null,
       benchmarkReturnPct: null,
       relativeReturnPct: null,
@@ -381,32 +567,31 @@ export function buildBenchmarkPerformance(snapshots: PortfolioSnapshot[], benchm
 
   const first = matched[0]
   const last = matched[matched.length - 1]
-  if (daysBetween(first.snapshot.snapshot_date, last.snapshot.snapshot_date) < 30) {
+  if (daysBetween(first.point.date, last.point.date) < MIN_BENCHMARK_OVERLAP_DAYS) {
     return {
       available: false,
       points: [],
-      overlapStartDate: first.snapshot.snapshot_date,
-      overlapEndDate: last.snapshot.snapshot_date,
+      overlapStartDate: first.point.date,
+      overlapEndDate: last.point.date,
       portfolioReturnPct: null,
       benchmarkReturnPct: null,
       relativeReturnPct: null,
       trackingDifferencePct: null,
-      message: 'Need at least 30 days of overlapping portfolio and benchmark history.',
+      message: 'Benchmark overlap too short.',
     }
   }
 
-  const basePortfolio = n(first.snapshot.total_value)
-  const baseContribution = n(first.snapshot.contribution)
+  const basePortfolio = first.point.portfolio
   const baseBenchmark = first.benchmarkPrice
   const points = matched.flatMap((item) => {
-    const portfolioReturn = (n(item.snapshot.total_value) - basePortfolio - (n(item.snapshot.contribution) - baseContribution)) / basePortfolio
-    const benchmarkReturn = item.benchmarkPrice / baseBenchmark - 1
-    if (!Number.isFinite(portfolioReturn) || !Number.isFinite(benchmarkReturn)) return []
+    const portfolioIndex = item.point.portfolio / basePortfolio * 100
+    const benchmarkIndexValue = item.benchmarkPrice / baseBenchmark * 100
+    if (!Number.isFinite(portfolioIndex) || !Number.isFinite(benchmarkIndexValue)) return []
     return [{
-      date: item.snapshot.snapshot_date,
-      month: dateLabel(item.snapshot.snapshot_date),
-      portfolio: (1 + portfolioReturn) * 100,
-      benchmark: (1 + benchmarkReturn) * 100,
+      date: item.point.date,
+      month: dateLabel(item.point.date),
+      portfolio: portfolioIndex,
+      benchmark: benchmarkIndexValue,
     }]
   })
 
@@ -414,8 +599,8 @@ export function buildBenchmarkPerformance(snapshots: PortfolioSnapshot[], benchm
     return {
       available: false,
       points: [],
-      overlapStartDate: first.snapshot.snapshot_date,
-      overlapEndDate: last.snapshot.snapshot_date,
+      overlapStartDate: first.point.date,
+      overlapEndDate: last.point.date,
       portfolioReturnPct: null,
       benchmarkReturnPct: null,
       relativeReturnPct: null,
@@ -426,14 +611,28 @@ export function buildBenchmarkPerformance(snapshots: PortfolioSnapshot[], benchm
 
   const portfolioReturnPct = points[points.length - 1].portfolio / 100 - 1
   const benchmarkReturnPct = points[points.length - 1].benchmark / 100 - 1
+  if (Math.abs(portfolioReturnPct) > MAX_PERIOD_RETURN || Math.abs(benchmarkReturnPct) > MAX_PERIOD_RETURN) {
+    return {
+      available: false,
+      points: [],
+      overlapStartDate: first.point.date,
+      overlapEndDate: last.point.date,
+      portfolioReturnPct: null,
+      benchmarkReturnPct: null,
+      relativeReturnPct: null,
+      trackingDifferencePct: null,
+      message: 'Benchmark comparison suppressed because the estimate is too extreme.',
+    }
+  }
+
   const pointDiffs = points.map((point) => (point.portfolio - point.benchmark) / 100)
   const trackingDifferencePct = pointDiffs.reduce((sum, value) => sum + value, 0) / pointDiffs.length
 
   return {
     available: true,
     points,
-    overlapStartDate: first.snapshot.snapshot_date,
-    overlapEndDate: last.snapshot.snapshot_date,
+    overlapStartDate: first.point.date,
+    overlapEndDate: last.point.date,
     portfolioReturnPct,
     benchmarkReturnPct,
     relativeReturnPct: portfolioReturnPct - benchmarkReturnPct,
