@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent, FormEvent, InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from 'react'
-import { Banknote, BarChart3, FileUp, History, Landmark, Loader2, Percent, PieChart, Plus, Save, Scale, Trash2, TrendingUp, Wallet } from 'lucide-react'
+import { Banknote, BarChart3, CheckCircle2, FileUp, History, Landmark, Loader2, Percent, PieChart, Plus, Save, Search, Scale, Trash2, TrendingUp, Wallet } from 'lucide-react'
 import { BenchmarkComparisonChart, MonthlyDividendChart, MonthlyReturnsChart } from '@/components/Charts'
 import { Card, PageHeader, Shell, StatCard, TrustBadge } from '@/components/Shell'
 import { projectEdoBond, summarizeEdoBonds } from '@/lib/bond-engine'
@@ -27,12 +27,15 @@ import {
 } from '@/lib/market/csv-import'
 import { supabase } from '@/lib/supabase/client'
 import {
+  applyInstrumentPresetToAsset,
   createCashLedgerEntry,
   createDividend,
   deleteCashLedgerEntry,
   deleteDividend,
   getDefaultPortfolio,
   getPortfolioBenchmark,
+  listBenchmarkCandidates,
+  listInstrumentCatalog,
   listAssets,
   listAssetPrices,
   listCashLedgerEntries,
@@ -49,6 +52,7 @@ import {
   type CashLedgerEntryType,
   type DividendRecord,
   type EdoBond,
+  type InstrumentCatalogRow,
   type MarketPriceHistoryPoint,
   type Portfolio,
   type PortfolioBenchmark,
@@ -175,6 +179,38 @@ function providerSymbolHint(asset: Asset | null, draft: string) {
   return raw
 }
 
+function normalizeCatalogQuery(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+function filterCatalogPresets(rows: InstrumentCatalogRow[], query: string) {
+  const terms = normalizeCatalogQuery(query).split(/\s+/).filter(Boolean)
+  if (terms.length === 0) return rows.slice(0, 8)
+
+  return rows.filter((row) => {
+    const haystack = normalizeCatalogQuery([
+      row.name,
+      row.symbol,
+      row.market_symbol,
+      row.provider,
+      row.category,
+      row.currency,
+      row.exchange ?? '',
+      row.country ?? '',
+      ...(row.aliases ?? []),
+    ].join(' '))
+    return terms.every((term) => haystack.includes(term))
+  }).slice(0, 8)
+}
+
+function catalogMeta(row: InstrumentCatalogRow) {
+  return `${row.provider} · ${row.category.replaceAll('_', ' ')} · ${row.currency}${row.exchange ? ` · ${row.exchange}` : ''}`
+}
+
 export default function PortfolioIntelligencePage() {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
@@ -185,6 +221,8 @@ export default function PortfolioIntelligencePage() {
   const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([])
   const [cashEntries, setCashEntries] = useState<CashLedgerEntry[]>([])
   const [dividendRecords, setDividendRecords] = useState<DividendRecord[]>([])
+  const [instrumentCatalog, setInstrumentCatalog] = useState<InstrumentCatalogRow[]>([])
+  const [benchmarkCatalog, setBenchmarkCatalog] = useState<InstrumentCatalogRow[]>([])
   const [benchmark, setBenchmark] = useState<PortfolioBenchmark | null>(null)
   const [benchmarkAssetId, setBenchmarkAssetId] = useState('')
   const [benchmarkHistory, setBenchmarkHistory] = useState<MarketPriceHistoryPoint[]>([])
@@ -194,6 +232,10 @@ export default function PortfolioIntelligencePage() {
   const [backfillLoading, setBackfillLoading] = useState(false)
   const [backfillResult, setBackfillResult] = useState<BackfillResult | null>(null)
   const [marketSymbolDrafts, setMarketSymbolDrafts] = useState<Record<string, string>>({})
+  const [catalogQuery, setCatalogQuery] = useState('')
+  const [benchmarkCatalogQuery, setBenchmarkCatalogQuery] = useState('')
+  const [applyingPresetId, setApplyingPresetId] = useState<string | null>(null)
+  const [presetMessage, setPresetMessage] = useState<string | null>(null)
   const [csvImportAssetId, setCsvImportAssetId] = useState('')
   const [csvImportSource, setCsvImportSource] = useState<CsvImportSourceLabel>('manual_csv')
   const [csvImportCurrency, setCsvImportCurrency] = useState<SupportedCashCurrency>('PLN')
@@ -236,6 +278,8 @@ export default function PortfolioIntelligencePage() {
         cashList,
         dividendList,
         benchmarkRow,
+        catalogRows,
+        benchmarkCatalogRows,
       ] = await Promise.all([
         listAssets(defaultPortfolio.id),
         listTransactions(defaultPortfolio.id),
@@ -245,6 +289,8 @@ export default function PortfolioIntelligencePage() {
         listCashLedgerEntries(defaultPortfolio.id),
         listDividends(defaultPortfolio.id),
         getPortfolioBenchmark(defaultPortfolio.id),
+        listInstrumentCatalog(),
+        listBenchmarkCandidates(),
       ])
 
       const baseCurrency = asCurrency(defaultPortfolio.currency)
@@ -256,6 +302,8 @@ export default function PortfolioIntelligencePage() {
       setSnapshots(snapshotList)
       setCashEntries(cashList)
       setDividendRecords(dividendList)
+      setInstrumentCatalog(catalogRows)
+      setBenchmarkCatalog(benchmarkCatalogRows)
       setBenchmark(benchmarkRow)
       setBenchmarkAssetId(benchmarkRow?.benchmark_asset_id ?? '')
       setBackfillAssetId((current) => current && assetList.some((asset) => asset.id === current)
@@ -338,6 +386,8 @@ export default function PortfolioIntelligencePage() {
   const selectedBenchmark = assets.find((asset) => asset.id === benchmarkAssetId) ?? null
   const selectedBackfillAsset = marketAssets.find((asset) => asset.id === backfillAssetId) ?? null
   const selectedBackfillSymbol = providerSymbolHint(selectedBackfillAsset, selectedBackfillAsset ? marketSymbolDrafts[selectedBackfillAsset.id] ?? '' : '')
+  const backfillCatalogResults = useMemo(() => filterCatalogPresets(instrumentCatalog, catalogQuery), [instrumentCatalog, catalogQuery])
+  const benchmarkCatalogResults = useMemo(() => filterCatalogPresets(benchmarkCatalog, benchmarkCatalogQuery), [benchmarkCatalog, benchmarkCatalogQuery])
   const selectedCsvImportAsset = marketAssets.find((asset) => asset.id === csvImportAssetId) ?? null
   const csvPreview = useMemo(() => parseHistoricalPriceCsv(csvText), [csvText])
   const latestSnapshotAllocation = snapshots[snapshots.length - 1]?.allocation_breakdown ?? []
@@ -421,6 +471,24 @@ export default function PortfolioIntelligencePage() {
       setError(err?.message ?? 'Nie udało się zapisać symbolu provider.')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleApplyPreset(asset: Asset | null, preset: InstrumentCatalogRow) {
+    if (!asset) return
+
+    setApplyingPresetId(preset.id)
+    setPresetMessage(null)
+    setError(null)
+    try {
+      const updated = await applyInstrumentPresetToAsset(asset.id, preset.id)
+      setAssets((current) => current.map((item) => item.id === updated.id ? updated : item))
+      setMarketSymbolDrafts((current) => ({ ...current, [updated.id]: updated.market_symbol ?? '' }))
+      setPresetMessage(`Zastosowano preset ${preset.symbol} -> ${preset.market_symbol}.`)
+    } catch (err: any) {
+      setError(err?.message ?? 'Nie udało się zastosować presetu instrumentu.')
+    } finally {
+      setApplyingPresetId(null)
     }
   }
 
@@ -559,6 +627,7 @@ export default function PortfolioIntelligencePage() {
       />
 
       {error ? <div className="mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
+      {presetMessage ? <div className="mb-6 flex items-center gap-2 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100"><CheckCircle2 size={16} /> {presetMessage}</div> : null}
       {loading ? <div className="mb-6 flex items-center gap-2 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Ładowanie Portfolio Intelligence...</div> : null}
 
       <div className="mb-6 flex flex-wrap gap-2">
@@ -699,6 +768,25 @@ export default function PortfolioIntelligencePage() {
               </Select>
             </div>
             <p className="mt-4 text-xs text-slate-500">Zapisano: {benchmark?.benchmark_asset_id ? selectedBenchmark?.symbol ?? 'benchmark' : 'brak'}</p>
+            <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <Search size={16} className="text-cyan-200" />
+                <p className="text-sm font-semibold text-white">Katalog benchmarków</p>
+              </div>
+              <Input
+                placeholder="Szukaj: Nasdaq, S&P 500, ACWI, MSCI World"
+                value={benchmarkCatalogQuery}
+                onChange={setBenchmarkCatalogQuery}
+              />
+              <CatalogPresetList
+                rows={benchmarkCatalogResults}
+                targetAsset={selectedBenchmark}
+                applyingPresetId={applyingPresetId}
+                emptyText="Brak kandydatów benchmarku dla tej frazy."
+                onApply={handleApplyPreset}
+              />
+              {!selectedBenchmark ? <p className="mt-3 text-xs text-slate-500">Wybierz aktywo benchmarku, żeby zastosować preset do istniejącej pozycji.</p> : null}
+            </div>
           </Card>
           <Card>
             <h3 className="text-lg font-bold text-white">Portfolio vs benchmark</h3>
@@ -758,6 +846,24 @@ export default function PortfolioIntelligencePage() {
                     >
                       <Save size={16} /> Zapisz
                     </button>
+                  </div>
+                  <div className="mt-4 border-t border-white/10 pt-4">
+                    <div className="mb-3 flex items-center gap-2">
+                      <Search size={16} className="text-cyan-200" />
+                      <p className="text-sm font-semibold text-white">Preset z katalogu</p>
+                    </div>
+                    <Input
+                      placeholder="Szukaj: BTC, IUSQ, Nasdaq, Apple"
+                      value={catalogQuery}
+                      onChange={setCatalogQuery}
+                    />
+                    <CatalogPresetList
+                      rows={backfillCatalogResults}
+                      targetAsset={selectedBackfillAsset}
+                      applyingPresetId={applyingPresetId}
+                      emptyText="Brak presetów dla tej frazy."
+                      onApply={handleApplyPreset}
+                    />
                   </div>
                 </div>
               ) : null}
@@ -968,6 +1074,48 @@ function AllocationDriftTable({ rows }: { rows: ReturnType<typeof buildAllocatio
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+function CatalogPresetList({
+  rows,
+  targetAsset,
+  applyingPresetId,
+  emptyText,
+  onApply,
+}: {
+  rows: InstrumentCatalogRow[]
+  targetAsset: Asset | null
+  applyingPresetId: string | null
+  emptyText: string
+  onApply: (asset: Asset | null, preset: InstrumentCatalogRow) => void
+}) {
+  if (rows.length === 0) return <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-500">{emptyText}</div>
+
+  return (
+    <div className="mt-3 space-y-2">
+      {rows.map((row) => (
+        <div key={row.id} className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-slate-950/50 p-3 md:flex-row md:items-center md:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="font-semibold text-white">{row.symbol}</p>
+              <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-xs font-semibold text-cyan-200">{row.market_symbol}</span>
+            </div>
+            <p className="mt-1 truncate text-sm text-slate-300">{row.name}</p>
+            <p className="mt-1 text-xs text-slate-500">{catalogMeta(row)}</p>
+          </div>
+          <button
+            type="button"
+            disabled={!targetAsset || applyingPresetId === row.id}
+            onClick={() => onApply(targetAsset, row)}
+            className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white/10 px-3 py-2 text-sm font-semibold text-white transition hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {applyingPresetId === row.id ? <Loader2 className="animate-spin" size={15} /> : <CheckCircle2 size={15} />}
+            Zastosuj
+          </button>
+        </div>
+      ))}
     </div>
   )
 }
