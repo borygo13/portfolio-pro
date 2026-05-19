@@ -89,6 +89,24 @@ type BackfillResult = {
   error?: string
 }
 
+type PortfolioHistoryBackfillResult = {
+  ok: boolean
+  status: string
+  range: BackfillRange
+  startDate: string | null
+  endDate: string
+  requestedDays: number
+  processedDays: number
+  generatedSnapshots: number
+  skippedExistingDays: number
+  skippedNoActivityDays: number
+  skippedMissingPriceDays: number
+  remainingDays: number
+  skippedDays?: { date: string; reason: string }[]
+  errorDays?: { date: string; error: string }[]
+  error?: string
+}
+
 type CsvImportResult = {
   ok: boolean
   savedRows: number
@@ -231,6 +249,9 @@ export default function PortfolioIntelligencePage() {
   const [backfillAssetId, setBackfillAssetId] = useState('')
   const [backfillLoading, setBackfillLoading] = useState(false)
   const [backfillResult, setBackfillResult] = useState<BackfillResult | null>(null)
+  const [portfolioHistoryRange, setPortfolioHistoryRange] = useState<BackfillRange>('1Y')
+  const [portfolioHistoryLoading, setPortfolioHistoryLoading] = useState(false)
+  const [portfolioHistoryResult, setPortfolioHistoryResult] = useState<PortfolioHistoryBackfillResult | null>(null)
   const [marketSymbolDrafts, setMarketSymbolDrafts] = useState<Record<string, string>>({})
   const [catalogQuery, setCatalogQuery] = useState('')
   const [benchmarkCatalogQuery, setBenchmarkCatalogQuery] = useState('')
@@ -338,7 +359,7 @@ export default function PortfolioIntelligencePage() {
     }
 
     let cancelled = false
-    listMarketPriceHistory(portfolio.id, benchmarkAssetId)
+    listMarketPriceHistory(portfolio.id, benchmarkAssetId, 'MAX')
       .then((history) => {
         if (!cancelled) setBenchmarkHistory(history)
       })
@@ -391,6 +412,9 @@ export default function PortfolioIntelligencePage() {
   const selectedCsvImportAsset = marketAssets.find((asset) => asset.id === csvImportAssetId) ?? null
   const csvPreview = useMemo(() => parseHistoricalPriceCsv(csvText), [csvText])
   const latestSnapshotAllocation = snapshots[snapshots.length - 1]?.allocation_breakdown ?? []
+  const portfolioHistoryPoints = snapshots.filter((snapshot) => num(snapshot.total_value) > 0).length
+  const hasMonthlyReturnData = monthlyReturns.length > 0
+  const hasBenchmarkComparisonData = benchmarkComparison.length >= 2
 
   async function handleCashSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -534,6 +558,42 @@ export default function PortfolioIntelligencePage() {
     }
   }
 
+  async function handlePortfolioHistoryBackfillSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!portfolio) return
+
+    setPortfolioHistoryLoading(true)
+    setPortfolioHistoryResult(null)
+    setError(null)
+    try {
+      const { data } = await supabase.auth.getSession()
+      const token = data.session?.access_token
+      if (!token) throw new Error('Brak aktywnej sesji użytkownika.')
+
+      const response = await fetch('/api/portfolio/snapshots/backfill', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          range: portfolioHistoryRange,
+          portfolio_id: portfolio.id,
+        }),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result?.error ?? 'Nie udało się wygenerować historii portfolio.')
+
+      setPortfolioHistoryResult(result as PortfolioHistoryBackfillResult)
+      setSnapshots(await listPortfolioSnapshots(portfolio.id))
+      if (benchmarkAssetId) setBenchmarkHistory(await listMarketPriceHistory(portfolio.id, benchmarkAssetId, 'MAX'))
+    } catch (err: any) {
+      setError(err?.message ?? 'Nie udało się wygenerować historii portfolio.')
+    } finally {
+      setPortfolioHistoryLoading(false)
+    }
+  }
+
   async function handleCsvFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     if (!file) return
@@ -667,8 +727,8 @@ export default function PortfolioIntelligencePage() {
                 </div>
                 <TrustBadge>Estimated</TrustBadge>
               </div>
-              {monthlyReturns.length > 0 ? <MonthlyReturnsChart data={monthlyReturns} /> : <EmptyState text="Brak snapshotów do policzenia monthly returns." />}
-              {monthlyReturns.length > 0 ? <MonthlyReturnsTable rows={monthlyReturns} /> : null}
+              {hasMonthlyReturnData ? <MonthlyReturnsChart data={monthlyReturns} range="MAX" /> : <EmptyState text={portfolioHistoryPoints < 2 ? 'Not enough portfolio history yet. Run portfolio historical valuation backfill.' : 'Need more monthly snapshots before monthly returns are meaningful.'} />}
+              {hasMonthlyReturnData ? <MonthlyReturnsTable rows={monthlyReturns} /> : null}
             </Card>
 
             <Card>
@@ -676,7 +736,7 @@ export default function PortfolioIntelligencePage() {
                 <h3 className="text-lg font-bold text-white">Portfolio vs benchmark</h3>
                 <p className="mt-1 text-sm text-slate-500">Indeks 100 = pierwszy wspólny punkt historii.</p>
               </div>
-              {benchmarkComparison.length > 0 ? <BenchmarkComparisonChart data={benchmarkComparison} /> : <EmptyState text="Wybierz benchmark i upewnij się, że ma historię w market_prices." />}
+              {hasBenchmarkComparisonData ? <BenchmarkComparisonChart data={benchmarkComparison} range="MAX" /> : <EmptyState text="Not enough overlapping portfolio and benchmark history yet. Run portfolio historical valuation backfill and make sure the benchmark has market_prices." />}
             </Card>
           </div>
         </div>
@@ -791,7 +851,7 @@ export default function PortfolioIntelligencePage() {
           <Card>
             <h3 className="text-lg font-bold text-white">Portfolio vs benchmark</h3>
             <p className="mt-1 text-sm text-slate-500">Porównanie bazowane do 100 na pierwszym wspólnym punkcie.</p>
-            {benchmarkComparison.length > 0 ? <BenchmarkComparisonChart data={benchmarkComparison} /> : <EmptyState text="Potrzeba portfolio_snapshots oraz historii market_prices dla benchmarku." />}
+            {hasBenchmarkComparisonData ? <BenchmarkComparisonChart data={benchmarkComparison} range="MAX" /> : <EmptyState text="Potrzeba co najmniej dwóch wspólnych punktów historii portfolio_snapshots oraz market_prices dla benchmarku." />}
           </Card>
         </div>
       ) : null}
@@ -883,6 +943,26 @@ export default function PortfolioIntelligencePage() {
               <BackfillResultPanel result={backfillResult} loading={backfillLoading} />
             </Card>
           </div>
+
+          <Card>
+            <div className="flex items-start gap-3">
+              <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-emerald-500/10 text-emerald-200"><BarChart3 size={20} /></div>
+              <div>
+                <h3 className="text-lg font-bold text-white">Portfolio historical valuation</h3>
+                <p className="mt-1 text-sm text-slate-500">Generuje dzienne `portfolio_snapshots` z transakcji i historycznych `market_prices`. Request przetwarza maksymalnie 1200 dni, więc długie zakresy można uruchamiać ponownie.</p>
+              </div>
+            </div>
+            <form onSubmit={handlePortfolioHistoryBackfillSubmit} className="mt-5 grid gap-3 md:grid-cols-[220px_auto] md:items-start">
+              <Select value={portfolioHistoryRange} onChange={(value) => setPortfolioHistoryRange(value as BackfillRange)}>
+                {backfillRanges.map((range) => <option key={range} value={range}>{range}</option>)}
+              </Select>
+              <SubmitButton disabled={portfolioHistoryLoading}>
+                {portfolioHistoryLoading ? <Loader2 className="animate-spin" size={16} /> : <BarChart3 size={16} />}
+                Generate portfolio history
+              </SubmitButton>
+            </form>
+            <PortfolioHistoryResultPanel result={portfolioHistoryResult} loading={portfolioHistoryLoading} snapshots={snapshots.length} />
+          </Card>
 
           <Card>
             <div className="mb-5 flex items-start gap-3">
@@ -1159,6 +1239,60 @@ function BackfillResultPanel({ result, loading }: { result: BackfillResult | nul
       {result.remainingAssets && result.remainingAssets.length > 0 ? (
         <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
           Pozostałe aktywa do kolejnego requestu: {result.remainingAssets.map((asset) => asset.symbol).join(', ')}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function PortfolioHistoryResultPanel({ result, loading, snapshots }: { result: PortfolioHistoryBackfillResult | null; loading: boolean; snapshots: number }) {
+  if (loading) return <div className="mt-5 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Portfolio valuation backfill w toku...</div>
+  if (!result) {
+    return (
+      <div className="mt-5 grid gap-3 md:grid-cols-3">
+        <InfoLine label="Current snapshots" value={String(snapshots)} />
+        <InfoLine label="Mode" value="incremental" />
+        <InfoLine label="Source" value="market_prices" />
+      </div>
+    )
+  }
+
+  const skipped = result.skippedDays ?? []
+  const errors = result.errorDays ?? []
+
+  return (
+    <div className="mt-5 space-y-4">
+      <div className="grid gap-3 md:grid-cols-4">
+        <InfoLine label="Status" value={result.status} />
+        <InfoLine label="Generated" value={String(result.generatedSnapshots)} />
+        <InfoLine label="Processed days" value={String(result.processedDays)} />
+        <InfoLine label="Remaining" value={String(result.remainingDays)} />
+      </div>
+      <div className="grid gap-3 md:grid-cols-4">
+        <InfoLine label="Range" value={`${result.startDate ? formatDate(result.startDate) : '—'} → ${formatDate(result.endDate)}`} />
+        <InfoLine label="Existing skipped" value={String(result.skippedExistingDays)} />
+        <InfoLine label="No activity" value={String(result.skippedNoActivityDays)} />
+        <InfoLine label="Missing price" value={String(result.skippedMissingPriceDays)} />
+      </div>
+
+      {result.remainingDays > 0 ? <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">Zakres jest dłuższy niż limit requestu. Uruchom backfill ponownie, żeby dokończyć pozostałe dni.</div> : null}
+      {result.error ? <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{result.error}</div> : null}
+
+      {skipped.length > 0 ? (
+        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
+          <p className="font-semibold text-white">Skipped days</p>
+          <div className="mt-3 space-y-2">
+            {skipped.slice(0, 6).map((item) => <p key={`${item.date}-${item.reason}`}>{formatDate(item.date)} · {item.reason}</p>)}
+          </div>
+        </div>
+      ) : null}
+
+      {errors.length > 0 ? (
+        <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">
+          <p className="font-semibold">Error days</p>
+          <div className="mt-3 space-y-2">
+            {errors.slice(0, 6).map((item) => <p key={`${item.date}-${item.error}`}>{formatDate(item.date)} · {item.error}</p>)}
+          </div>
         </div>
       ) : null}
     </div>

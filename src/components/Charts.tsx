@@ -27,6 +27,24 @@ const tooltip = {
   color: '#fff',
 }
 
+type ChartRange = '30D' | '90D' | '1Y' | '3Y' | '5Y' | 'MAX'
+
+function fullDateLabel(value: unknown) {
+  if (typeof value !== 'string') return String(value ?? '')
+  const date = new Date(`${value}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleDateString('pl-PL', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+function axisDateLabel(value: unknown, range: ChartRange = 'MAX') {
+  if (typeof value !== 'string') return String(value ?? '')
+  const date = new Date(`${value}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return value
+  if (range === '30D' || range === '90D') return date.toLocaleDateString('pl-PL', { day: '2-digit', month: 'short' })
+  if (range === '1Y') return date.toLocaleDateString('pl-PL', { month: 'short', year: '2-digit' })
+  return date.toLocaleDateString('pl-PL', { year: 'numeric' })
+}
+
 export function AllocationChart({ data, total }: { data: { name: string; value: number }[]; total?: number }) {
   return (
     <div className="relative h-[280px]">
@@ -114,30 +132,34 @@ export function MonthlyDividendChart({ data }: { data: { month: string; gross: n
   )
 }
 
-export function MonthlyReturnsChart({ data }: { data: { month: string; returnPct: number }[] }) {
+export function MonthlyReturnsChart({ data, range = 'MAX' }: { data: { date?: string; month: string; returnPct: number }[]; range?: ChartRange }) {
+  const chartData = data.map((item) => ({ ...item, date: item.date ?? item.month }))
+
   return (
     <ResponsiveContainer width="100%" height={250}>
-      <BarChart data={data} margin={{ top: 10, right: 0, left: -25, bottom: 0 }}>
+      <BarChart data={chartData} margin={{ top: 10, right: 0, left: -25, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.10)" />
-        <XAxis dataKey="month" stroke="#64748b" tickLine={false} axisLine={false} />
+        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, range)} stroke="#64748b" tickLine={false} axisLine={false} />
         <YAxis stroke="#64748b" tickLine={false} axisLine={false} tickFormatter={(v) => PCT.format(Number(v))} />
-        <Tooltip formatter={(v) => PCT.format(Number(v))} contentStyle={tooltip} />
+        <Tooltip formatter={(v) => PCT.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} />
         <Bar dataKey="returnPct" name="Zwrot m/m" radius={[8, 8, 0, 0]}>
-          {data.map((entry, i) => <Cell key={i} fill={entry.returnPct >= 0 ? '#22c55e' : '#ef4444'} />)}
+          {chartData.map((entry, i) => <Cell key={i} fill={entry.returnPct >= 0 ? '#22c55e' : '#ef4444'} />)}
         </Bar>
       </BarChart>
     </ResponsiveContainer>
   )
 }
 
-export function BenchmarkComparisonChart({ data }: { data: { month: string; portfolio: number; benchmark: number }[] }) {
+export function BenchmarkComparisonChart({ data, range = 'MAX' }: { data: { date?: string; month: string; portfolio: number; benchmark: number }[]; range?: ChartRange }) {
+  const chartData = data.map((item) => ({ ...item, date: item.date ?? item.month }))
+
   return (
     <ResponsiveContainer width="100%" height={280}>
-      <LineChart data={data} margin={{ top: 12, right: 8, left: -15, bottom: 0 }}>
+      <LineChart data={chartData} margin={{ top: 12, right: 8, left: -15, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
-        <XAxis dataKey="month" stroke="#64748b" tickLine={false} axisLine={false} />
+        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, range)} stroke="#64748b" tickLine={false} axisLine={false} />
         <YAxis stroke="#64748b" tickLine={false} axisLine={false} tickFormatter={(v) => `${Math.round(Number(v))}`} />
-        <Tooltip formatter={(v) => Number(v).toFixed(1)} contentStyle={tooltip} />
+        <Tooltip formatter={(v) => Number(v).toFixed(1)} labelFormatter={fullDateLabel} contentStyle={tooltip} />
         <Line type="monotone" dataKey="portfolio" name="Portfolio" stroke="#8b5cf6" strokeWidth={3} dot={false} />
         <Line type="monotone" dataKey="benchmark" name="Benchmark" stroke="#06b6d4" strokeWidth={3} dot={false} />
       </LineChart>
