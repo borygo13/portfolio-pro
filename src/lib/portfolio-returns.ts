@@ -15,6 +15,16 @@ export type ReturnMetric = {
   endDate?: string | null
 }
 
+export type ExclusionReason =
+  | 'cashFlowDominated'
+  | 'duplicate'
+  | 'extremeReturn'
+  | 'invalidBaseline'
+  | 'missingValue'
+  | 'nearZeroBase'
+  | 'nonFinite'
+  | 'sparse'
+
 export type ReturnInterval = {
   startDate: string
   endDate: string
@@ -27,7 +37,8 @@ export type ReturnInterval = {
   denominator: number
   returnPct: number | null
   validForTwr: boolean
-  excludedReason?: string
+  excludedReason?: ExclusionReason
+  excludedReasonLabel?: string
 }
 
 export type ReturnCurvePoint = {
@@ -65,6 +76,11 @@ export type TruePortfolioReturns = {
   rollingReturnCurve: RollingReturnPoint[]
   drawdownCurve: DrawdownCurvePoint[]
   benchmarkRelativeCurve: BenchmarkRelativePoint[]
+  benchmarkOverlapPoints: number
+  exclusionReasonCounts: Record<ExclusionReason, number>
+  exclusionReasonSummary: string
+  returnCurveReason: string | null
+  drawdownReason: string | null
   twrReturn: ReturnMetric
   mwrApprox: ReturnMetric
   cagr: ReturnMetric
@@ -98,15 +114,31 @@ const EPS = 0.000001
 const MIN_RETURN_BASE = 100
 const MIN_VALID_INTERVALS = 10
 const MIN_CURVE_POINTS = 10
+const MIN_DRAWDOWN_POINTS = 10
 const MAX_INTERVAL_GAP_DAYS = 45
-const MAX_INTERVAL_RETURN = 0.85
+const MAX_INTERVAL_RETURN = 0.6
 const MAX_TOTAL_RETURN = 10
-const MAX_EXCLUDED_RATIO = 0.4
-const CASH_FLOW_DOMINANCE_MULTIPLE = 1.5
+const MAX_EXCLUDED_RATIO = 0.85
+const CASH_FLOW_DOMINANCE_MULTIPLE = 5
+const MIN_CASH_FLOW_DOMINANCE_ABS = 1000
+const MIN_CURVE_VALUE = 5
+const MAX_MWR_ABS_RETURN = 2
+const MAX_ANNUALIZED_VOLATILITY = 4
 const ROLLING_YEAR_DAYS = 365
 const ROLLING_VOL_DAYS = 30
 const BENCHMARK_STALE_DAYS = 10
 const MIN_BENCHMARK_OVERLAP_DAYS = 30
+const MIN_BENCHMARK_OVERLAP_POINTS = 10
+const EXCLUSION_LABELS: Record<ExclusionReason, string> = {
+  cashFlowDominated: 'cash-flow dominated',
+  duplicate: 'duplicate',
+  extremeReturn: 'extreme return',
+  invalidBaseline: 'invalid baseline',
+  missingValue: 'missing value',
+  nearZeroBase: 'near-zero base',
+  nonFinite: 'non-finite',
+  sparse: 'sparse',
+}
 
 function n(value: unknown) {
   const parsed = Number(value ?? 0)
@@ -146,6 +178,10 @@ function sortSnapshots(snapshots: PortfolioSnapshot[]) {
 function metric(value: number | null, reason?: string, startDate?: string | null, endDate?: string | null): ReturnMetric {
   const available = value != null && Number.isFinite(value)
   return { available, value: available ? value : null, reason: available ? undefined : reason ?? 'Limited data.', startDate, endDate }
+}
+
+function excluded(base: Omit<ReturnInterval, 'returnPct' | 'validForTwr'>, reason: ExclusionReason): ReturnInterval {
+  return { ...base, returnPct: null, validForTwr: false, excludedReason: reason, excludedReasonLabel: EXCLUSION_LABELS[reason] }
 }
 
 function emptyEvent(date: string): ReturnEvent {
@@ -230,7 +266,9 @@ function intervalFromSnapshots(start: PortfolioSnapshot, end: PortfolioSnapshot,
     ? event.externalFlow
     : Math.abs(snapshotFlow) > EPS
       ? snapshotFlow
-      : event.transactionFlowProxy
+      : startValue < MIN_RETURN_BASE * 2
+        ? event.transactionFlowProxy
+        : 0
   const denominator = startValue + externalFlow * 0.5
   const gapDays = daysBetween(start.snapshot_date, end.snapshot_date)
 
@@ -246,19 +284,19 @@ function intervalFromSnapshots(start: PortfolioSnapshot, end: PortfolioSnapshot,
     denominator,
   }
 
-  if (gapDays <= 0) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Duplicate snapshot date.' }
-  if (gapDays > MAX_INTERVAL_GAP_DAYS) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Sparse snapshot gap.' }
-  if (startValue <= 0 || endValue <= 0) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Missing portfolio value.' }
-  if (denominator < MIN_RETURN_BASE) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Starting base too low.' }
+  if (gapDays <= 0) return excluded(base, 'duplicate')
+  if (gapDays > MAX_INTERVAL_GAP_DAYS) return excluded(base, 'sparse')
+  if (startValue <= 0 || endValue <= 0) return excluded(base, 'missingValue')
+  if (denominator < MIN_RETURN_BASE) return excluded(base, 'nearZeroBase')
 
-  const cashFlowDominated = Math.abs(externalFlow) > Math.max(MIN_RETURN_BASE * 5, startValue * CASH_FLOW_DOMINANCE_MULTIPLE)
+  const cashFlowDominated = Math.abs(externalFlow) > Math.max(MIN_CASH_FLOW_DOMINANCE_ABS, startValue * CASH_FLOW_DOMINANCE_MULTIPLE)
   if (cashFlowDominated) {
-    return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Cash-flow dominated interval.' }
+    return excluded(base, 'cashFlowDominated')
   }
 
   const returnPct = (endValue + event.income - event.expense - startValue - externalFlow) / denominator
-  if (!Number.isFinite(returnPct)) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Return is not finite.' }
-  if (Math.abs(returnPct) > MAX_INTERVAL_RETURN) return { ...base, returnPct: null, validForTwr: false, excludedReason: 'Interval return too extreme.' }
+  if (!Number.isFinite(returnPct)) return excluded(base, 'nonFinite')
+  if (Math.abs(returnPct) > MAX_INTERVAL_RETURN) return excluded(base, 'extremeReturn')
 
   return { ...base, returnPct, validForTwr: true }
 }
@@ -276,7 +314,7 @@ function buildIntervals(snapshots: PortfolioSnapshot[], events: ReturnEvent[]) {
 }
 
 function cumulativeCurve(validIntervals: ReturnInterval[]) {
-  if (validIntervals.length < MIN_VALID_INTERVALS) return []
+  if (validIntervals.length < MIN_VALID_INTERVALS) return { points: [] as ReturnCurvePoint[], reason: 'Need more valid contribution-adjusted intervals.' }
   let indexValue = 100
   const curve: ReturnCurvePoint[] = [{
     date: validIntervals[0].startDate,
@@ -287,7 +325,12 @@ function cumulativeCurve(validIntervals: ReturnInterval[]) {
 
   for (const interval of validIntervals) {
     indexValue *= 1 + (interval.returnPct ?? 0)
-    if (!Number.isFinite(indexValue) || indexValue <= 0 || indexValue > (1 + MAX_TOTAL_RETURN) * 100) return []
+    if (!Number.isFinite(indexValue) || indexValue <= 0 || indexValue > (1 + MAX_TOTAL_RETURN) * 100) {
+      return { points: [] as ReturnCurvePoint[], reason: 'Cumulative return curve failed safety guards.' }
+    }
+    if (indexValue < MIN_CURVE_VALUE) {
+      return { points: [] as ReturnCurvePoint[], reason: 'Cumulative return curve collapsed below the safety floor.' }
+    }
     curve.push({
       date: interval.endDate,
       label: dateLabel(interval.endDate),
@@ -296,12 +339,12 @@ function cumulativeCurve(validIntervals: ReturnInterval[]) {
     })
   }
 
-  return curve
+  return { points: curve, reason: null }
 }
 
 function twrMetric(curve: ReturnCurvePoint[], excludedRatio: number) {
   if (curve.length < MIN_CURVE_POINTS) return metric(null, 'Need more valid contribution-adjusted intervals.')
-  if (excludedRatio > MAX_EXCLUDED_RATIO) return metric(null, 'Too many intervals were excluded from TWR.')
+  if (excludedRatio > MAX_EXCLUDED_RATIO && curve.length < 30) return metric(null, 'Too many intervals were excluded from TWR.')
   const value = curve[curve.length - 1].value / 100 - 1
   if (!Number.isFinite(value) || Math.abs(value) > MAX_TOTAL_RETURN) return metric(null, 'TWR suppressed because the estimate is too extreme.')
   return metric(value, undefined, curve[0].date, curve[curve.length - 1].date)
@@ -329,9 +372,10 @@ function mwrApproxMetric(snapshots: PortfolioSnapshot[], intervals: ReturnInterv
   }
 
   const denominator = beginValue + weightedFlows
-  if (denominator < MIN_RETURN_BASE) return metric(null, 'Money-weighted denominator is too low.')
+  const capitalScale = Math.max(MIN_RETURN_BASE, (beginValue + endingValue + Math.abs(weightedFlows)) / 3)
+  if (denominator < MIN_RETURN_BASE || denominator < capitalScale * 0.1) return metric(null, 'Money-weighted denominator is too low.')
   const value = (endingValue + income - expense - beginValue - totalFlows) / denominator
-  if (!Number.isFinite(value) || Math.abs(value) > MAX_TOTAL_RETURN) return metric(null, 'MWR estimate suppressed by safety guard.')
+  if (!Number.isFinite(value) || Math.abs(value) > MAX_MWR_ABS_RETURN) return metric(null, 'MWR estimate suppressed by safety guard.')
   return metric(value, undefined, first.snapshot_date, last.snapshot_date)
 }
 
@@ -375,29 +419,42 @@ function rollingExtremes(points: RollingReturnPoint[]) {
   }
 }
 
-function rolling30dVolatility(validIntervals: ReturnInterval[]) {
-  if (validIntervals.length === 0) return metric(null, 'Need valid return observations.')
-  const lastDate = validIntervals[validIntervals.length - 1].endDate
+function rolling30dVolatility(intervals: ReturnInterval[]) {
+  if (intervals.length === 0) return metric(null, 'Need valid return observations.')
+  const lastDate = intervals[intervals.length - 1].endDate
   const startDate = addDays(lastDate, -ROLLING_VOL_DAYS)
-  const window = validIntervals.filter((interval) => interval.endDate >= startDate)
-  if (window.length < 10) return metric(null, 'Need at least 10 valid observations in the latest 30D window.')
-  const returns = window.map((interval) => interval.returnPct ?? 0)
+  const window = intervals.filter((interval) => interval.endDate >= startDate)
+  const validWindow = window.filter((interval) => interval.validForTwr && interval.returnPct != null)
+  if (window.length > 0 && (window.length - validWindow.length) / window.length > 0.5) {
+    return metric(null, 'Latest 30D window is cash-flow dominated or sparse.')
+  }
+  if (validWindow.length < 10) return metric(null, 'Need at least 10 valid observations in the latest 30D window.')
+  const returns = validWindow.flatMap((interval) => {
+    const gapDays = Math.max(1, daysBetween(interval.startDate, interval.endDate))
+    const daily = (1 + (interval.returnPct ?? 0)) ** (1 / gapDays) - 1
+    return Number.isFinite(daily) ? [daily] : []
+  })
+  if (returns.length < 10) return metric(null, 'Need at least 10 valid daily return observations.')
   const average = returns.reduce((sum, value) => sum + value, 0) / returns.length
   const variance = returns.reduce((sum, value) => sum + (value - average) ** 2, 0) / (returns.length - 1)
   const value = Math.sqrt(Math.max(0, variance)) * Math.sqrt(252)
-  if (!Number.isFinite(value) || value > 5) return metric(null, 'Volatility suppressed by safety guard.')
+  if (!Number.isFinite(value) || value > MAX_ANNUALIZED_VOLATILITY) return metric(null, 'Volatility suppressed by safety guard.')
   return metric(value, undefined, startDate, lastDate)
 }
 
 function drawdownCurve(curve: ReturnCurvePoint[]) {
-  let peak = 0
+  const first = curve.find((point) => Number.isFinite(point.value) && point.value >= MIN_CURVE_VALUE)
+  if (!first || curve.length < MIN_DRAWDOWN_POINTS) return { points: [] as DrawdownCurvePoint[], reason: 'Need more valid return curve points for drawdown.' }
+  let peak = first.value
   const points: DrawdownCurvePoint[] = []
   for (const point of curve) {
+    if (!Number.isFinite(point.value) || point.value < MIN_CURVE_VALUE) continue
     peak = Math.max(peak, point.value)
     const drawdownPct = peak > 0 ? point.value / peak - 1 : 0
     if (Number.isFinite(drawdownPct)) points.push({ date: point.date, label: point.label, drawdownPct })
   }
-  return points
+  if (points.length < MIN_DRAWDOWN_POINTS) return { points: [] as DrawdownCurvePoint[], reason: 'Need more valid drawdown points.' }
+  return { points, reason: null }
 }
 
 function recoveryMetric(drawdowns: DrawdownCurvePoint[], validIntervals: ReturnInterval[]) {
@@ -427,37 +484,41 @@ function closestBenchmarkPoint(history: MarketPriceHistoryPoint[], date: string,
 }
 
 function benchmarkRelative(curve: ReturnCurvePoint[], history: MarketPriceHistoryPoint[]) {
+  const validCurve = curve.filter((point) => Number.isFinite(point.value) && point.value >= MIN_CURVE_VALUE)
   const benchmark = history
     .filter((point) => benchmarkValue(point) != null)
     .slice()
     .sort((a, b) => a.price_date.localeCompare(b.price_date))
 
-  if (curve.length < 2 || benchmark.length < 2) {
-    return { points: [], metric: metric(null, 'Need portfolio and benchmark history.') }
+  if (validCurve.length < MIN_BENCHMARK_OVERLAP_POINTS || benchmark.length < 2) {
+    return { points: [], metric: metric(null, 'Need portfolio and benchmark history.'), overlapPoints: 0 }
   }
 
   const matched: { curve: ReturnCurvePoint; benchmarkPrice: number }[] = []
   let benchmarkIndex = 0
-  for (const point of curve) {
+  for (const point of validCurve) {
     const match = closestBenchmarkPoint(benchmark, point.date, benchmarkIndex)
     benchmarkIndex = match.index
     const price = match.point ? benchmarkValue(match.point) : null
     if (price != null) matched.push({ curve: point, benchmarkPrice: price })
   }
 
-  if (matched.length < 2) return { points: [], metric: metric(null, 'Benchmark overlap too short.') }
+  if (matched.length < MIN_BENCHMARK_OVERLAP_POINTS) return { points: [], metric: metric(null, 'Benchmark overlap too short.'), overlapPoints: matched.length }
   const first = matched[0]
   const last = matched[matched.length - 1]
   if (daysBetween(first.curve.date, last.curve.date) < MIN_BENCHMARK_OVERLAP_DAYS) {
-    return { points: [], metric: metric(null, 'Benchmark overlap too short.', first.curve.date, last.curve.date) }
+    return { points: [], metric: metric(null, 'Benchmark overlap too short.', first.curve.date, last.curve.date), overlapPoints: matched.length }
   }
 
   const basePortfolio = first.curve.value
   const baseBenchmark = first.benchmarkPrice
+  if (!Number.isFinite(basePortfolio) || !Number.isFinite(baseBenchmark) || basePortfolio < MIN_CURVE_VALUE || baseBenchmark <= 0) {
+    return { points: [], metric: metric(null, 'Benchmark-relative baseline is invalid.', first.curve.date, last.curve.date), overlapPoints: matched.length }
+  }
   const points = matched.flatMap((item) => {
     const portfolio = item.curve.value / basePortfolio * 100
     const benchmarkValueIndexed = item.benchmarkPrice / baseBenchmark * 100
-    if (!Number.isFinite(portfolio) || !Number.isFinite(benchmarkValueIndexed)) return []
+    if (!Number.isFinite(portfolio) || !Number.isFinite(benchmarkValueIndexed) || portfolio < MIN_CURVE_VALUE || benchmarkValueIndexed <= 0) return []
     return [{
       date: item.curve.date,
       label: item.curve.label,
@@ -467,13 +528,30 @@ function benchmarkRelative(curve: ReturnCurvePoint[], history: MarketPriceHistor
     }]
   })
 
-  if (points.length < 2) return { points: [], metric: metric(null, 'Benchmark comparison has too few valid points.') }
+  if (points.length < MIN_BENCHMARK_OVERLAP_POINTS) return { points: [], metric: metric(null, 'Benchmark comparison has too few valid points.', first.curve.date, last.curve.date), overlapPoints: points.length }
   const final = points[points.length - 1]
   const relative = final.portfolio / final.benchmark - 1
-  if (!Number.isFinite(relative) || Math.abs(relative) > MAX_TOTAL_RETURN) {
-    return { points: [], metric: metric(null, 'Benchmark-relative estimate suppressed by safety guard.') }
+  if (!Number.isFinite(relative) || Math.abs(relative) > MAX_TOTAL_RETURN || relative <= -0.95) {
+    return { points: [], metric: metric(null, 'Benchmark-relative estimate suppressed by safety guard.', first.curve.date, last.curve.date), overlapPoints: points.length }
   }
-  return { points, metric: metric(relative, undefined, first.curve.date, last.curve.date) }
+  return { points, metric: metric(relative, undefined, first.curve.date, last.curve.date), overlapPoints: points.length }
+}
+
+function buildExclusionReasonCounts(intervals: ReturnInterval[]): Record<ExclusionReason, number> {
+  const counts = Object.fromEntries(Object.keys(EXCLUSION_LABELS).map((key) => [key, 0])) as Record<ExclusionReason, number>
+  for (const interval of intervals) {
+    if (interval.excludedReason) counts[interval.excludedReason] += 1
+  }
+  return counts
+}
+
+function exclusionSummary(counts: Record<ExclusionReason, number>) {
+  const entries = (Object.keys(counts) as ExclusionReason[])
+    .filter((key) => counts[key] > 0)
+    .sort((a, b) => counts[b] - counts[a])
+    .slice(0, 3)
+  if (entries.length === 0) return 'none'
+  return entries.map((key) => `${EXCLUSION_LABELS[key]} ${counts[key]}`).join(' · ')
 }
 
 export function buildTruePortfolioReturns(input: EngineInput): TruePortfolioReturns {
@@ -484,28 +562,34 @@ export function buildTruePortfolioReturns(input: EngineInput): TruePortfolioRetu
   const excludedIntervals = intervals.filter((interval) => !interval.validForTwr)
   const excludedRatio = intervals.length > 0 ? excludedIntervals.length / intervals.length : 1
   const curve = cumulativeCurve(validIntervals)
-  const twr = twrMetric(curve, excludedRatio)
-  const rolling = rollingReturnCurve(curve)
+  const twr = curve.points.length > 0 ? twrMetric(curve.points, excludedRatio) : metric(null, curve.reason ?? 'Need more valid return curve points.')
+  const rolling = rollingReturnCurve(curve.points)
   const rollingBounds = rollingExtremes(rolling)
-  const drawdowns = drawdownCurve(curve)
-  const benchmark = benchmarkRelative(curve, input.benchmarkHistory)
+  const drawdowns = drawdownCurve(curve.points)
+  const benchmark = benchmarkRelative(curve.points, input.benchmarkHistory)
+  const exclusionReasonCounts = buildExclusionReasonCounts(intervals)
 
   return {
     intervals,
     validIntervals,
     excludedIntervals,
-    cumulativeReturnCurve: curve,
+    cumulativeReturnCurve: curve.points,
     rollingReturnCurve: rolling,
-    drawdownCurve: drawdowns,
+    drawdownCurve: drawdowns.points,
     benchmarkRelativeCurve: benchmark.points,
+    benchmarkOverlapPoints: benchmark.overlapPoints,
+    exclusionReasonCounts,
+    exclusionReasonSummary: exclusionSummary(exclusionReasonCounts),
+    returnCurveReason: curve.reason,
+    drawdownReason: drawdowns.reason,
     twrReturn: twr,
     mwrApprox: mwrApproxMetric(snapshots, intervals),
     cagr: cagrMetric(twr),
-    rolling30dVolatility: rolling30dVolatility(validIntervals),
+    rolling30dVolatility: rolling30dVolatility(intervals),
     bestRolling12m: rollingBounds.best,
     worstRolling12m: rollingBounds.worst,
     benchmarkRelativeReturn: benchmark.metric,
-    recoveryFromDrawdownMonths: recoveryMetric(drawdowns, validIntervals),
-    summaryReason: twr.available ? null : twr.reason ?? 'True return engine needs more valid history.',
+    recoveryFromDrawdownMonths: recoveryMetric(drawdowns.points, validIntervals),
+    summaryReason: twr.available ? null : twr.reason ?? curve.reason ?? 'True return engine needs more valid history.',
   }
 }

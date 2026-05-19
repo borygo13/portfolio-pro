@@ -757,11 +757,12 @@ export default function PortfolioIntelligencePage() {
             </div>
           ) : null}
 
-          <div className="grid gap-3 md:grid-cols-4">
+          <div className="grid gap-3 md:grid-cols-5">
             <InfoLine label="Valid TWR intervals" value={String(trueReturns.validIntervals.length)} />
             <InfoLine label="Excluded intervals" value={String(trueReturns.excludedIntervals.length)} />
-            <InfoLine label="TWR curve points" value={String(trueReturns.cumulativeReturnCurve.length)} />
-            <InfoLine label="Benchmark points" value={String(trueReturns.benchmarkRelativeCurve.length)} />
+            <InfoLine label="Excluded reasons" value={trueReturns.exclusionReasonSummary} />
+            <InfoLine label="Return curve" value={String(trueReturns.cumulativeReturnCurve.length)} />
+            <InfoLine label="Benchmark overlap" value={String(trueReturns.benchmarkOverlapPoints)} />
           </div>
 
           <div className="grid gap-6 2xl:grid-cols-3">
@@ -781,7 +782,7 @@ export default function PortfolioIntelligencePage() {
                 <h3 className="text-lg font-bold text-white">Rolling drawdown</h3>
                 <p className="mt-1 text-sm text-slate-500">Drawdown from the true-return cumulative curve, not raw deposits.</p>
               </div>
-              {trueReturns.drawdownCurve.length > 0 ? <DrawdownCurveChart data={trueReturns.drawdownCurve} range="MAX" /> : <EmptyState text="Need more valid contribution-adjusted intervals for drawdown." />}
+              {trueReturns.drawdownCurve.length > 0 ? <DrawdownCurveChart data={trueReturns.drawdownCurve} range="MAX" /> : <EmptyState text={trueReturns.drawdownReason ?? 'Need more valid contribution-adjusted intervals for drawdown.'} />}
             </Card>
 
             <Card>
