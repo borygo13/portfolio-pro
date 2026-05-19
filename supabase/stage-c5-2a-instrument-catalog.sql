@@ -1,0 +1,256 @@
+-- Stage C5.2a Instrument Catalog & Symbol Resolver
+-- Additive migration only. Provides a curated provider-symbol catalog for asset setup,
+-- backfill, CSV import, and benchmark selection.
+
+create extension if not exists "uuid-ossp";
+
+create table if not exists instrument_catalog (
+  id uuid primary key default uuid_generate_v4(),
+  name text not null,
+  symbol text not null,
+  market_symbol text not null,
+  provider text not null,
+  category text not null,
+  asset_type text not null,
+  currency text not null,
+  exchange text,
+  country text,
+  aliases text[] not null default '{}',
+  benchmark_candidate boolean not null default false,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists instrument_catalog_provider_market_symbol_key
+  on instrument_catalog(provider, market_symbol);
+create index if not exists instrument_catalog_symbol_idx on instrument_catalog(symbol);
+create index if not exists instrument_catalog_market_symbol_idx on instrument_catalog(market_symbol);
+create index if not exists instrument_catalog_provider_idx on instrument_catalog(provider);
+create index if not exists instrument_catalog_category_idx on instrument_catalog(category);
+create index if not exists instrument_catalog_benchmark_candidate_idx on instrument_catalog(benchmark_candidate) where benchmark_candidate = true;
+create index if not exists instrument_catalog_aliases_idx on instrument_catalog using gin(aliases);
+create index if not exists instrument_catalog_text_search_idx on instrument_catalog using gin (
+  to_tsvector(
+    'simple',
+    coalesce(name, '') || ' ' ||
+    coalesce(symbol, '') || ' ' ||
+    coalesce(market_symbol, '') || ' ' ||
+    coalesce(category, '') || ' ' ||
+    coalesce(array_to_string(aliases, ' '), '')
+  )
+);
+
+alter table instrument_catalog enable row level security;
+
+drop policy if exists "authenticated read active instrument catalog" on instrument_catalog;
+create policy "authenticated read active instrument catalog" on instrument_catalog
+for select
+to authenticated
+using (is_active = true);
+
+revoke all on table instrument_catalog from anon, authenticated;
+grant select on table instrument_catalog to authenticated;
+
+insert into instrument_catalog (
+  name, symbol, market_symbol, provider, category, asset_type, currency, exchange, country, aliases, benchmark_candidate, is_active
+)
+values
+  ('Bitcoin', 'BTC', 'bitcoin', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['xbt', 'bitcoin btc'], true, true),
+  ('Ethereum', 'ETH', 'ethereum', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['ether'], true, true),
+  ('XRP', 'XRP', 'ripple', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['ripple'], false, true),
+  ('Solana', 'SOL', 'solana', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['sol'], false, true),
+  ('BNB', 'BNB', 'binancecoin', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['binance coin'], false, true),
+  ('Cardano', 'ADA', 'cardano', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['ada'], false, true),
+  ('Dogecoin', 'DOGE', 'dogecoin', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['doge'], false, true),
+  ('Avalanche', 'AVAX', 'avalanche-2', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['avax'], false, true),
+  ('Polkadot', 'DOT', 'polkadot', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['dot'], false, true),
+  ('Chainlink', 'LINK', 'chainlink', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['link'], false, true),
+  ('Litecoin', 'LTC', 'litecoin', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['ltc'], false, true),
+  ('Bitcoin Cash', 'BCH', 'bitcoin-cash', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['bch'], false, true),
+  ('Stellar', 'XLM', 'stellar', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['xlm'], false, true),
+  ('TRON', 'TRX', 'tron', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['trx'], false, true),
+  ('Polygon', 'MATIC', 'polygon', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['matic', 'pol'], false, true),
+  ('Toncoin', 'TON', 'the-open-network', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['ton', 'open network'], false, true),
+  ('Uniswap', 'UNI', 'uniswap', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['uni'], false, true),
+  ('Aave', 'AAVE', 'aave', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['aave'], false, true),
+  ('Cosmos Hub', 'ATOM', 'cosmos', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['atom'], false, true),
+  ('Ethereum Classic', 'ETC', 'ethereum-classic', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['etc'], false, true),
+  ('Filecoin', 'FIL', 'filecoin', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['fil'], false, true),
+  ('Internet Computer', 'ICP', 'internet-computer', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['icp'], false, true),
+  ('NEAR Protocol', 'NEAR', 'near', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['near'], false, true),
+  ('Hedera', 'HBAR', 'hedera-hashgraph', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['hbar'], false, true),
+  ('Optimism', 'OP', 'optimism', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['op'], false, true),
+  ('Arbitrum', 'ARB', 'arbitrum', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['arb'], false, true),
+  ('Algorand', 'ALGO', 'algorand', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['algo'], false, true),
+  ('VeChain', 'VET', 'vechain', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['vet'], false, true),
+  ('Injective', 'INJ', 'injective-protocol', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['inj'], false, true),
+  ('Render', 'RENDER', 'render-token', 'coingecko', 'crypto', 'Crypto', 'PLN', null, null, array['rndr'], false, true),
+
+  ('Apple Inc.', 'AAPL', 'aapl.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['apple'], false, true),
+  ('Microsoft Corp.', 'MSFT', 'msft.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['microsoft'], false, true),
+  ('NVIDIA Corp.', 'NVDA', 'nvda.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['nvidia'], false, true),
+  ('Amazon.com Inc.', 'AMZN', 'amzn.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['amazon'], false, true),
+  ('Meta Platforms Inc.', 'META', 'meta.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['facebook', 'meta'], false, true),
+  ('Alphabet Inc. Class A', 'GOOGL', 'googl.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['google', 'alphabet'], false, true),
+  ('Alphabet Inc. Class C', 'GOOG', 'goog.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['google', 'alphabet'], false, true),
+  ('Tesla Inc.', 'TSLA', 'tsla.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['tesla'], false, true),
+  ('Berkshire Hathaway Class B', 'BRK.B', 'brk.b.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['berkshire', 'buffett'], false, true),
+  ('JPMorgan Chase & Co.', 'JPM', 'jpm.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['jpmorgan'], false, true),
+  ('Visa Inc.', 'V', 'v.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['visa'], false, true),
+  ('Mastercard Inc.', 'MA', 'ma.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['mastercard'], false, true),
+  ('UnitedHealth Group', 'UNH', 'unh.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['unitedhealth'], false, true),
+  ('Exxon Mobil Corp.', 'XOM', 'xom.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['exxon'], false, true),
+  ('Costco Wholesale', 'COST', 'cost.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['costco'], false, true),
+  ('Home Depot', 'HD', 'hd.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['home depot'], false, true),
+  ('Procter & Gamble', 'PG', 'pg.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['procter gamble'], false, true),
+  ('Johnson & Johnson', 'JNJ', 'jnj.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['johnson'], false, true),
+  ('Netflix Inc.', 'NFLX', 'nflx.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['netflix'], false, true),
+  ('Advanced Micro Devices', 'AMD', 'amd.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['amd'], false, true),
+  ('Broadcom Inc.', 'AVGO', 'avgo.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['broadcom'], false, true),
+  ('Oracle Corp.', 'ORCL', 'orcl.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['oracle'], false, true),
+  ('Salesforce Inc.', 'CRM', 'crm.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['salesforce'], false, true),
+  ('Adobe Inc.', 'ADBE', 'adbe.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['adobe'], false, true),
+  ('Coca-Cola Co.', 'KO', 'ko.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['coca cola'], false, true),
+  ('PepsiCo Inc.', 'PEP', 'pep.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['pepsi'], false, true),
+  ('Walmart Inc.', 'WMT', 'wmt.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['walmart'], false, true),
+  ('Bank of America', 'BAC', 'bac.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['bank america'], false, true),
+  ('Merck & Co.', 'MRK', 'mrk.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['merck'], false, true),
+  ('AbbVie Inc.', 'ABBV', 'abbv.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['abbvie'], false, true),
+  ('Eli Lilly', 'LLY', 'lly.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['lilly'], false, true),
+  ('Thermo Fisher Scientific', 'TMO', 'tmo.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['thermo fisher'], false, true),
+  ('McDonald''s Corp.', 'MCD', 'mcd.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['mcdonalds'], false, true),
+  ('Cisco Systems', 'CSCO', 'csco.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['cisco'], false, true),
+  ('Accenture plc', 'ACN', 'acn.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['accenture'], false, true),
+  ('Intuit Inc.', 'INTU', 'intu.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['intuit'], false, true),
+  ('Qualcomm Inc.', 'QCOM', 'qcom.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['qualcomm'], false, true),
+  ('Texas Instruments', 'TXN', 'txn.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['texas instruments'], false, true),
+  ('Applied Materials', 'AMAT', 'amat.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['applied materials'], false, true),
+  ('Linde plc', 'LIN', 'lin.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['linde'], false, true),
+  ('Nike Inc.', 'NKE', 'nke.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['nike'], false, true),
+  ('Walt Disney Co.', 'DIS', 'dis.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['disney'], false, true),
+  ('IBM', 'IBM', 'ibm.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['international business machines'], false, true),
+  ('General Electric', 'GE', 'ge.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['ge'], false, true),
+  ('Caterpillar Inc.', 'CAT', 'cat.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['caterpillar'], false, true),
+  ('Goldman Sachs', 'GS', 'gs.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['goldman'], false, true),
+  ('Morgan Stanley', 'MS', 'ms.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['morgan stanley'], false, true),
+  ('ServiceNow', 'NOW', 'now.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NYSE', 'US', array['servicenow'], false, true),
+  ('Intuitive Surgical', 'ISRG', 'isrg.us', 'stooq', 'us_stock', 'Akcje', 'USD', 'NASDAQ', 'US', array['intuitive surgical'], false, true),
+
+  ('SPDR S&P 500 ETF Trust', 'SPY', 'spy.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['s&p 500', 'sp500', 'benchmark'], true, true),
+  ('iShares Core S&P 500 ETF', 'IVV', 'ivv.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['s&p 500', 'sp500'], true, true),
+  ('Vanguard S&P 500 ETF', 'VOO', 'voo.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['s&p 500', 'sp500'], true, true),
+  ('Invesco QQQ Trust', 'QQQ', 'qqq.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NASDAQ', 'US', array['nasdaq 100', 'nasdaq', 'technology'], true, true),
+  ('SPDR Dow Jones Industrial Average ETF', 'DIA', 'dia.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['dow jones', 'dow'], true, true),
+  ('iShares Russell 2000 ETF', 'IWM', 'iwm.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['russell 2000', 'small cap'], true, true),
+  ('Vanguard Total Stock Market ETF', 'VTI', 'vti.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['total stock market'], true, true),
+  ('Vanguard Total International Stock ETF', 'VXUS', 'vxus.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NASDAQ', 'US', array['international stocks', 'ex us'], true, true),
+  ('Vanguard Total Bond Market ETF', 'BND', 'bnd.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NASDAQ', 'US', array['bonds', 'aggregate bond'], true, true),
+  ('iShares 20+ Year Treasury Bond ETF', 'TLT', 'tlt.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NASDAQ', 'US', array['treasury', 'long bond'], true, true),
+  ('SPDR Gold Shares', 'GLD', 'gld.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['gold'], true, true),
+  ('iShares Silver Trust', 'SLV', 'slv.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['silver'], false, true),
+  ('iShares Core U.S. Aggregate Bond ETF', 'AGG', 'agg.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['aggregate bond'], true, true),
+  ('Schwab U.S. Dividend Equity ETF', 'SCHD', 'schd.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['dividend'], false, true),
+  ('Vanguard Dividend Appreciation ETF', 'VIG', 'vig.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['dividend'], false, true),
+  ('Vanguard High Dividend Yield ETF', 'VYM', 'vym.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['dividend yield'], false, true),
+  ('ARK Innovation ETF', 'ARKK', 'arkk.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['ark innovation'], false, true),
+  ('iShares MSCI EAFE ETF', 'EFA', 'efa.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['eafe', 'developed markets'], true, true),
+  ('iShares MSCI Emerging Markets ETF', 'EEM', 'eem.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['emerging markets'], true, true),
+  ('iShares 7-10 Year Treasury Bond ETF', 'IEF', 'ief.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NASDAQ', 'US', array['treasury'], false, true),
+  ('iShares iBoxx High Yield Corporate Bond ETF', 'HYG', 'hyg.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['high yield', 'bonds'], false, true),
+  ('iShares iBoxx Investment Grade Corporate Bond ETF', 'LQD', 'lqd.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['corporate bond'], false, true),
+  ('Financial Select Sector SPDR Fund', 'XLF', 'xlf.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['financials'], false, true),
+  ('Technology Select Sector SPDR Fund', 'XLK', 'xlk.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['technology'], false, true),
+  ('Energy Select Sector SPDR Fund', 'XLE', 'xle.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['energy'], false, true),
+  ('Health Care Select Sector SPDR Fund', 'XLV', 'xlv.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['health care'], false, true),
+  ('Consumer Discretionary Select Sector SPDR Fund', 'XLY', 'xly.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['consumer discretionary'], false, true),
+  ('Consumer Staples Select Sector SPDR Fund', 'XLP', 'xlp.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['consumer staples'], false, true),
+  ('Industrial Select Sector SPDR Fund', 'XLI', 'xli.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['industrials'], false, true),
+  ('Utilities Select Sector SPDR Fund', 'XLU', 'xlu.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['utilities'], false, true),
+  ('Vanguard Real Estate ETF', 'VNQ', 'vnq.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['reit', 'real estate'], false, true),
+  ('iShares Gold Trust', 'IAU', 'iau.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['gold'], false, true),
+  ('iShares TIPS Bond ETF', 'TIP', 'tip.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['tips', 'inflation bonds'], false, true),
+  ('iShares 1-3 Year Treasury Bond ETF', 'SHY', 'shy.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NASDAQ', 'US', array['short treasury'], false, true),
+  ('Vanguard Total World Stock ETF', 'VT', 'vt.us', 'stooq', 'us_etf', 'ETF', 'USD', 'NYSE Arca', 'US', array['world stocks', 'global'], true, true),
+
+  ('iShares MSCI ACWI UCITS ETF', 'IUSQ.DE', 'iusq.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['msci acwi', 'acwi', 'all country world'], true, true),
+  ('Vanguard FTSE All-World UCITS ETF', 'VWCE.DE', 'vwce.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['ftse all-world', 'all world', 'vanguard all-world'], true, true),
+  ('iShares Core MSCI World UCITS ETF', 'EUNL.DE', 'eunl.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['msci world', 'developed world'], true, true),
+  ('iShares Core S&P 500 UCITS ETF', 'SXR8.DE', 'sxr8.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['s&p 500', 'sp500'], true, true),
+  ('Vanguard S&P 500 UCITS ETF', 'VUAA.DE', 'vuaa.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['s&p 500', 'sp500'], true, true),
+  ('iShares Nasdaq 100 UCITS ETF', 'CNDX.DE', 'cndx.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['nasdaq 100', 'nasdaq'], true, true),
+  ('iShares Nasdaq 100 UCITS ETF EUR', 'SXRV.DE', 'sxrv.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['nasdaq 100', 'nasdaq'], true, true),
+  ('iShares Core MSCI Emerging Markets IMI UCITS ETF', 'IS3N.DE', 'is3n.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['emerging markets', 'em imi'], true, true),
+  ('iShares Core MSCI Emerging Markets IMI UCITS ETF', 'EMIM.L', 'emim.uk', 'stooq', 'ucits_etf', 'ETF', 'USD', 'LSE', 'GB', array['emerging markets', 'emim'], true, true),
+  ('iShares Core S&P 500 UCITS ETF', 'CSPX.L', 'cspx.uk', 'stooq', 'ucits_etf', 'ETF', 'USD', 'LSE', 'GB', array['s&p 500', 'sp500'], true, true),
+  ('iShares Core MSCI World UCITS ETF', 'IWDA.L', 'iwda.uk', 'stooq', 'ucits_etf', 'ETF', 'USD', 'LSE', 'GB', array['msci world'], true, true),
+  ('iShares Core MSCI World UCITS ETF', 'SWDA.L', 'swda.uk', 'stooq', 'ucits_etf', 'ETF', 'USD', 'LSE', 'GB', array['msci world'], true, true),
+  ('Vanguard FTSE All-World UCITS ETF', 'VWRL.L', 'vwrl.uk', 'stooq', 'ucits_etf', 'ETF', 'GBP', 'LSE', 'GB', array['ftse all-world', 'all world'], true, true),
+  ('Vanguard FTSE All-World UCITS ETF Acc', 'VWRP.L', 'vwrp.uk', 'stooq', 'ucits_etf', 'ETF', 'GBP', 'LSE', 'GB', array['ftse all-world', 'all world'], true, true),
+  ('Vanguard S&P 500 UCITS ETF', 'VUSA.L', 'vusa.uk', 'stooq', 'ucits_etf', 'ETF', 'GBP', 'LSE', 'GB', array['s&p 500', 'sp500'], true, true),
+  ('iShares S&P 500 UCITS ETF', 'IUSA.L', 'iusa.uk', 'stooq', 'ucits_etf', 'ETF', 'GBP', 'LSE', 'GB', array['s&p 500', 'sp500'], true, true),
+  ('iShares Physical Gold ETC', 'SGLN.L', 'sgln.uk', 'stooq', 'ucits_etf', 'ETF', 'USD', 'LSE', 'GB', array['gold'], false, true),
+  ('iShares Physical Gold ETC', 'IGLN.L', 'igln.uk', 'stooq', 'ucits_etf', 'ETF', 'USD', 'LSE', 'GB', array['gold'], false, true),
+  ('iShares Core MSCI Europe UCITS ETF', 'MEUD.PA', 'meud.fr', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Euronext Paris', 'FR', array['europe', 'msci europe'], true, true),
+  ('iShares STOXX Europe 600 UCITS ETF', 'EXSA.DE', 'exsa.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['stoxx europe 600', 'europe'], true, true),
+  ('Xtrackers MSCI World UCITS ETF', 'DBXW.DE', 'dbxw.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['msci world', 'xtrackers'], true, true),
+  ('Xtrackers MSCI Emerging Markets UCITS ETF', 'XMME.DE', 'xmme.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['emerging markets'], true, true),
+  ('Xtrackers MSCI World Information Technology UCITS ETF', 'XDWT.DE', 'xdwt.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['technology', 'msci world tech'], false, true),
+  ('SPDR MSCI World Small Cap UCITS ETF', 'ZPRV.DE', 'zprv.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['small cap', 'msci world small cap'], false, true),
+  ('SPDR MSCI Europe Small Cap Value Weighted UCITS ETF', 'ZPRX.DE', 'zprx.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['europe small cap value'], false, true),
+  ('SPDR S&P 500 UCITS ETF', 'SPY5.DE', 'spy5.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['s&p 500', 'sp500'], true, true),
+  ('iShares S&P 500 Information Technology Sector UCITS ETF', 'QDVE.DE', 'qdve.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['s&p 500 technology', 'technology'], false, true),
+  ('iShares S&P 500 Information Technology Sector UCITS ETF', 'IUIT.L', 'iuit.uk', 'stooq', 'ucits_etf', 'ETF', 'USD', 'LSE', 'GB', array['s&p 500 technology', 'technology'], false, true),
+  ('Vanguard FTSE All-World High Dividend Yield UCITS ETF', 'VHYL.L', 'vhyl.uk', 'stooq', 'ucits_etf', 'ETF', 'GBP', 'LSE', 'GB', array['dividend', 'all-world dividend'], false, true),
+  ('iShares Global Aggregate Bond UCITS ETF', 'AGGH.L', 'aggh.uk', 'stooq', 'ucits_etf', 'ETF', 'GBP', 'LSE', 'GB', array['global bonds', 'aggregate bond'], true, true),
+  ('iShares Core Global Aggregate Bond UCITS ETF', 'EUNA.DE', 'euna.de', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Xetra', 'DE', array['global bonds', 'aggregate bond'], true, true),
+  ('Amundi MSCI World UCITS ETF', 'CW8.PA', 'cw8.fr', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Euronext Paris', 'FR', array['msci world', 'amundi'], true, true),
+  ('Amundi S&P 500 UCITS ETF', '500.PA', '500.fr', 'stooq', 'ucits_etf', 'ETF', 'EUR', 'Euronext Paris', 'FR', array['s&p 500', 'sp500', 'amundi'], true, true),
+  ('Vanguard FTSE Developed World UCITS ETF', 'VEVE.L', 'veve.uk', 'stooq', 'ucits_etf', 'ETF', 'GBP', 'LSE', 'GB', array['developed world'], true, true),
+  ('Vanguard FTSE Emerging Markets UCITS ETF', 'VFEM.L', 'vfem.uk', 'stooq', 'ucits_etf', 'ETF', 'GBP', 'LSE', 'GB', array['emerging markets'], true, true),
+
+  ('ORLEN S.A.', 'PKN.PL', 'pkn.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['orlen', 'pkn'], false, true),
+  ('CD Projekt S.A.', 'CDR.PL', 'cdr.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['cd projekt', 'cdred'], false, true),
+  ('Dino Polska S.A.', 'DNP.PL', 'dnp.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['dino'], false, true),
+  ('PKO Bank Polski S.A.', 'PKO.PL', 'pko.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['pko bp'], false, true),
+  ('PZU S.A.', 'PZU.PL', 'pzu.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['pzu'], false, true),
+  ('KGHM Polska Miedź S.A.', 'KGH.PL', 'kgh.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['kghm'], false, true),
+  ('Allegro.eu S.A.', 'ALE.PL', 'ale.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['allegro'], false, true),
+  ('LPP S.A.', 'LPP.PL', 'lpp.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['reserved', 'lpp'], false, true),
+  ('Bank Pekao S.A.', 'PEO.PL', 'peo.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['pekao'], false, true),
+  ('mBank S.A.', 'MBK.PL', 'mbk.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['mbank'], false, true),
+  ('ING Bank Śląski S.A.', 'ING.PL', 'ing.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['ing bsk'], false, true),
+  ('Cyfrowy Polsat S.A.', 'CPS.PL', 'cps.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['cyfrowy polsat'], false, true),
+  ('PGE Polska Grupa Energetyczna S.A.', 'PGE.PL', 'pge.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['pge'], false, true),
+  ('Tauron Polska Energia S.A.', 'TPE.PL', 'tpe.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['tauron'], false, true),
+  ('JSW S.A.', 'JSW.PL', 'jsw.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['jastrzębska spółka węglowa'], false, true),
+  ('CCC S.A.', 'CCC.PL', 'ccc.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['ccc'], false, true),
+  ('Santander Bank Polska S.A.', 'SPL.PL', 'spl.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['santander polska'], false, true),
+  ('Asseco Poland S.A.', 'ACP.PL', 'acp.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['asseco'], false, true),
+  ('Grupa Azoty S.A.', 'ATT.PL', 'att.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['azoty'], false, true),
+  ('Grupa Kęty S.A.', 'KTY.PL', 'kty.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['kety'], false, true),
+  ('Budimex S.A.', 'BDX.PL', 'bdx.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['budimex'], false, true),
+  ('Giełda Papierów Wartościowych S.A.', 'GPW.PL', 'gpw.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['gpw', 'warsaw stock exchange'], false, true),
+  ('XTB S.A.', 'XTB.PL', 'xtb.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['xtb'], false, true),
+  ('Ten Square Games S.A.', 'TEN.PL', 'ten.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['ten square games'], false, true),
+  ('11 bit studios S.A.', '11B.PL', '11b.pl', 'stooq', 'polish_stock', 'Akcje', 'PLN', 'GPW', 'PL', array['11 bit studios'], false, true),
+
+  ('Euro / Polish Zloty', 'EURPLN', 'eurpln', 'stooq', 'fx', 'Inne', 'PLN', 'FX', null, array['eur/pln', 'euro pln'], false, true),
+  ('US Dollar / Polish Zloty', 'USDPLN', 'usdpln', 'stooq', 'fx', 'Inne', 'PLN', 'FX', null, array['usd/pln', 'dollar pln'], false, true),
+  ('Euro / US Dollar', 'EURUSD', 'eurusd', 'stooq', 'fx', 'Inne', 'USD', 'FX', null, array['eur/usd'], false, true),
+  ('British Pound / Polish Zloty', 'GBPPLN', 'gbppln', 'stooq', 'fx', 'Inne', 'PLN', 'FX', null, array['gbp/pln', 'pound pln'], false, true),
+  ('Swiss Franc / Polish Zloty', 'CHFPLN', 'chfpln', 'stooq', 'fx', 'Inne', 'PLN', 'FX', null, array['chf/pln', 'franc pln'], false, true),
+  ('US Dollar / Japanese Yen', 'USDJPY', 'usdjpy', 'stooq', 'fx', 'Inne', 'JPY', 'FX', null, array['usd/jpy', 'yen'], false, true)
+on conflict (provider, market_symbol) do update
+set
+  name = excluded.name,
+  symbol = excluded.symbol,
+  category = excluded.category,
+  asset_type = excluded.asset_type,
+  currency = excluded.currency,
+  exchange = excluded.exchange,
+  country = excluded.country,
+  aliases = excluded.aliases,
+  benchmark_candidate = excluded.benchmark_candidate,
+  is_active = excluded.is_active,
+  updated_at = now();
