@@ -42,6 +42,7 @@ export type MonthlyPoint = {
 }
 
 export type MonthlyReturnPoint = {
+  date: string
   month: string
   startValue: number
   endValue: number
@@ -61,6 +62,7 @@ export type PerformanceMetrics = {
 }
 
 export type BenchmarkPoint = {
+  date: string
   month: string
   portfolio: number
   benchmark: number
@@ -112,7 +114,14 @@ function monthLabel(value: string) {
 function snapshotDateLabel(value: string) {
   const date = new Date(`${value}T00:00:00`)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleDateString('pl-PL', { month: 'short', day: '2-digit' })
+  return date.toLocaleDateString('pl-PL', { month: 'short', day: '2-digit', year: '2-digit' })
+}
+
+function daysBetween(start: string, end: string) {
+  const startDate = new Date(`${start}T00:00:00`).getTime()
+  const endDate = new Date(`${end}T00:00:00`).getTime()
+  if (!Number.isFinite(startDate) || !Number.isFinite(endDate)) return Number.POSITIVE_INFINITY
+  return Math.abs(endDate - startDate) / (24 * 60 * 60 * 1000)
 }
 
 export function isMarketPricedAsset(asset: Asset) {
@@ -231,14 +240,17 @@ export function buildMonthlyReturnPoints(snapshots: PortfolioSnapshot[]): Monthl
     byMonth.set(key, current)
   }
 
-  return Array.from(byMonth.entries()).map(([key, items]) => {
+  return Array.from(byMonth.entries()).flatMap(([key, items]) => {
+    if (items.length < 2) return []
     const first = items[0]
     const last = items[items.length - 1]
     const startValue = num(first.total_value)
     const endValue = num(last.total_value)
     const cashFlow = num(last.contribution) - num(first.contribution)
-    const returnPct = startValue > 0 ? (endValue - startValue - cashFlow) / startValue : 0
-    return { month: monthLabel(key), startValue, endValue, cashFlow, returnPct }
+    if (startValue <= 0 || endValue <= 0 || first.snapshot_date === last.snapshot_date) return []
+    const returnPct = (endValue - startValue - cashFlow) / startValue
+    if (!Number.isFinite(returnPct)) return []
+    return [{ date: last.snapshot_date, month: monthLabel(key), startValue, endValue, cashFlow, returnPct }]
   })
 }
 
@@ -302,7 +314,10 @@ export function calculatePerformanceMetrics(input: {
 }
 
 export function buildBenchmarkComparison(snapshots: PortfolioSnapshot[], benchmarkHistory: MarketPriceHistoryPoint[]): BenchmarkPoint[] {
-  const sortedSnapshots = snapshots.slice().sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))
+  const sortedSnapshots = snapshots
+    .slice()
+    .filter((snapshot) => num(snapshot.total_value) > 0)
+    .sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))
   const sortedBenchmark = benchmarkHistory
     .slice()
     .sort((a, b) => a.price_date.localeCompare(b.price_date))
@@ -322,7 +337,7 @@ export function buildBenchmarkComparison(snapshots: PortfolioSnapshot[], benchma
     }
 
     const benchmark = sortedBenchmark[benchmarkIndex]
-    if (benchmark.price_date <= snapshot.snapshot_date) {
+    if (benchmark.price_date <= snapshot.snapshot_date && daysBetween(benchmark.price_date, snapshot.snapshot_date) <= 10) {
       points.push({ snapshot, benchmarkPrice: num(benchmark.close_price_base ?? benchmark.close_price) })
     }
   }
@@ -333,11 +348,14 @@ export function buildBenchmarkComparison(snapshots: PortfolioSnapshot[], benchma
   const basePortfolio = num(first.snapshot.total_value)
   const baseBenchmark = first.benchmarkPrice
 
-  return points.map((point) => ({
+  const normalized = points.map((point) => ({
+    date: point.snapshot.snapshot_date,
     month: snapshotDateLabel(point.snapshot.snapshot_date),
     portfolio: basePortfolio > 0 ? (num(point.snapshot.total_value) / basePortfolio) * 100 : 100,
     benchmark: baseBenchmark > 0 ? (point.benchmarkPrice / baseBenchmark) * 100 : 100,
   }))
+
+  return normalized.length >= 2 ? normalized : []
 }
 
 export function buildAllocationBreakdown(positions: Position[], edoValue: number, cashValue: number, totalValue: number): AllocationBreakdownItem[] {
