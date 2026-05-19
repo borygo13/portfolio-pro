@@ -177,6 +177,16 @@ function formatDate(value: string) {
   return date.toLocaleDateString('pl-PL', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
+function formatDateRange(startDate: string | null | undefined, endDate: string | null | undefined) {
+  if (!startDate || !endDate) return null
+  return `${formatDate(startDate)} → ${formatDate(endDate)}`
+}
+
+function diagnosticCount(count: number, startDate: string | null | undefined, endDate: string | null | undefined) {
+  const range = formatDateRange(startDate, endDate)
+  return range ? `${count} · ${range}` : String(count)
+}
+
 function directionLabel(value: string) {
   if (value === 'buy') return 'Dokup'
   if (value === 'trim') return 'Redukuj'
@@ -758,11 +768,11 @@ export default function PortfolioIntelligencePage() {
           ) : null}
 
           <div className="grid gap-3 md:grid-cols-5">
-            <InfoLine label="Valid TWR intervals" value={String(trueReturns.validIntervals.length)} />
+            <InfoLine label="Valid TWR intervals" value={diagnosticCount(trueReturns.validIntervals.length, trueReturns.validIntervalStartDate, trueReturns.validIntervalEndDate)} />
             <InfoLine label="Excluded intervals" value={String(trueReturns.excludedIntervals.length)} />
             <InfoLine label="Excluded reasons" value={trueReturns.exclusionReasonSummary} />
             <InfoLine label="Return curve" value={String(trueReturns.cumulativeReturnCurve.length)} />
-            <InfoLine label="Benchmark overlap" value={String(trueReturns.benchmarkOverlapPoints)} />
+            <InfoLine label="Benchmark overlap" value={diagnosticCount(trueReturns.benchmarkOverlapPoints, trueReturns.benchmarkOverlapStartDate, trueReturns.benchmarkOverlapEndDate)} />
           </div>
 
           <div className="grid gap-6 2xl:grid-cols-3">
@@ -1554,5 +1564,5 @@ function CsvImportPreviewPanel({ preview, result, loading }: { preview: CsvImpor
 }
 
 function InfoLine({ label, value }: { label: string; value: string }) {
-  return <div className="flex items-center justify-between rounded-2xl bg-white/[0.04] p-3 text-sm"><span className="text-slate-500">{label}</span><span className="font-semibold text-white">{value}</span></div>
+  return <div className="flex items-center justify-between gap-3 rounded-2xl bg-white/[0.04] p-3 text-sm"><span className="shrink-0 text-slate-500">{label}</span><span className="min-w-0 text-right font-semibold text-white">{value}</span></div>
 }

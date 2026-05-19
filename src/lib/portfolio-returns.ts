@@ -77,6 +77,10 @@ export type TruePortfolioReturns = {
   drawdownCurve: DrawdownCurvePoint[]
   benchmarkRelativeCurve: BenchmarkRelativePoint[]
   benchmarkOverlapPoints: number
+  benchmarkOverlapStartDate: string | null
+  benchmarkOverlapEndDate: string | null
+  validIntervalStartDate: string | null
+  validIntervalEndDate: string | null
   exclusionReasonCounts: Record<ExclusionReason, number>
   exclusionReasonSummary: string
   returnCurveReason: string | null
@@ -119,9 +123,10 @@ const MAX_INTERVAL_GAP_DAYS = 45
 const MAX_INTERVAL_RETURN = 0.6
 const MAX_TOTAL_RETURN = 10
 const MAX_EXCLUDED_RATIO = 0.85
-const CASH_FLOW_DOMINANCE_MULTIPLE = 5
-const MIN_CASH_FLOW_DOMINANCE_ABS = 1000
-const MIN_CURVE_VALUE = 5
+const CASH_FLOW_DOMINANCE_MULTIPLE = 20
+const MIN_CASH_FLOW_DOMINANCE_ABS = 25000
+const MAX_CASH_FLOW_DOMINATED_RETURN = 0.25
+const MIN_CURVE_VALUE = 1
 const MAX_MWR_ABS_RETURN = 2
 const MAX_ANNUALIZED_VOLATILITY = 4
 const ROLLING_YEAR_DAYS = 365
@@ -149,30 +154,58 @@ function supportedCurrency(value: string | null | undefined): SupportedCashCurre
   return value === 'EUR' || value === 'USD' || value === 'PLN' ? value : 'PLN'
 }
 
+function dateKey(value: string | null | undefined) {
+  const text = String(value ?? '').trim()
+  if (!text) return ''
+  const dateOnly = text.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (dateOnly) return `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`
+  const parsed = new Date(text)
+  if (Number.isNaN(parsed.getTime())) return ''
+  return parsed.toISOString().slice(0, 10)
+}
+
+function dayTime(value: string) {
+  const key = dateKey(value)
+  if (!key) return Number.NaN
+  const [year, month, day] = key.split('-').map(Number)
+  return Date.UTC(year, month - 1, day)
+}
+
 function dateLabel(value: string) {
-  const date = new Date(`${value}T00:00:00`)
+  const key = dateKey(value)
+  if (!key) return value
+  const date = new Date(`${key}T00:00:00.000Z`)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleDateString('pl-PL', { day: '2-digit', month: 'short', year: '2-digit' })
+  return date.toLocaleDateString('pl-PL', { day: '2-digit', month: 'short', year: '2-digit', timeZone: 'UTC' })
 }
 
 function daysBetween(start: string, end: string) {
-  const startTime = new Date(`${start}T00:00:00`).getTime()
-  const endTime = new Date(`${end}T00:00:00`).getTime()
+  const startTime = dayTime(start)
+  const endTime = dayTime(end)
   if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return 0
   return Math.max(0, (endTime - startTime) / DAY_MS)
 }
 
 function addDays(date: string, days: number) {
-  const value = new Date(`${date}T00:00:00.000Z`)
+  const key = dateKey(date)
+  if (!key) return date
+  const value = new Date(`${key}T00:00:00.000Z`)
   value.setUTCDate(value.getUTCDate() + days)
   return value.toISOString().slice(0, 10)
 }
 
 function sortSnapshots(snapshots: PortfolioSnapshot[]) {
-  return snapshots
-    .filter((snapshot) => n(snapshot.total_value) > 0)
-    .slice()
-    .sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))
+  const byDate = new Map<string, PortfolioSnapshot>()
+  for (const snapshot of snapshots) {
+    const snapshotDate = dateKey(snapshot.snapshot_date)
+    if (!snapshotDate || n(snapshot.total_value) <= 0) continue
+    const normalized = { ...snapshot, snapshot_date: snapshotDate }
+    const current = byDate.get(snapshotDate)
+    if (!current || String(normalized.calculated_at ?? '').localeCompare(String(current.calculated_at ?? '')) >= 0) {
+      byDate.set(snapshotDate, normalized)
+    }
+  }
+  return Array.from(byDate.values()).sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))
 }
 
 function metric(value: number | null, reason?: string, startDate?: string | null, endDate?: string | null): ReturnMetric {
@@ -189,12 +222,14 @@ function emptyEvent(date: string): ReturnEvent {
 }
 
 function addEvent(map: Map<string, ReturnEvent>, date: string, patch: Partial<Omit<ReturnEvent, 'date'>>) {
-  const current = map.get(date) ?? emptyEvent(date)
+  const key = dateKey(date)
+  if (!key) return
+  const current = map.get(key) ?? emptyEvent(key)
   current.externalFlow += patch.externalFlow ?? 0
   current.income += patch.income ?? 0
   current.expense += patch.expense ?? 0
   current.transactionFlowProxy += patch.transactionFlowProxy ?? 0
-  map.set(date, current)
+  map.set(key, current)
 }
 
 function buildEvents(input: EngineInput) {
@@ -235,8 +270,8 @@ function snapshotFlowBetween(start: PortfolioSnapshot, end: PortfolioSnapshot) {
   const contributionDelta = n(end.contribution) - n(start.contribution)
   if (Math.abs(contributionDelta) > EPS) return contributionDelta
 
-  const netCashFlow = n(end.net_cash_flow)
-  if (Math.abs(netCashFlow) > EPS) return netCashFlow
+  const netCashFlowDelta = n(end.net_cash_flow) - n(start.net_cash_flow)
+  if (Math.abs(netCashFlowDelta) > EPS) return netCashFlowDelta
 
   const investedCostDelta = n(end.invested_cost) - n(start.invested_cost)
   if (Math.abs(investedCostDelta) > EPS) return investedCostDelta
@@ -245,9 +280,11 @@ function snapshotFlowBetween(start: PortfolioSnapshot, end: PortfolioSnapshot) {
 }
 
 function consumeEventsBetween(events: ReturnEvent[], cursor: { value: number }, startDate: string, endDate: string) {
-  const consumed = emptyEvent(endDate)
-  while (cursor.value < events.length && events[cursor.value].date <= startDate) cursor.value += 1
-  while (cursor.value < events.length && events[cursor.value].date <= endDate) {
+  const startKey = dateKey(startDate)
+  const endKey = dateKey(endDate)
+  const consumed = emptyEvent(endKey || endDate)
+  while (cursor.value < events.length && events[cursor.value].date <= startKey) cursor.value += 1
+  while (cursor.value < events.length && events[cursor.value].date <= endKey) {
     const event = events[cursor.value]
     consumed.externalFlow += event.externalFlow
     consumed.income += event.income
@@ -289,13 +326,10 @@ function intervalFromSnapshots(start: PortfolioSnapshot, end: PortfolioSnapshot,
   if (startValue <= 0 || endValue <= 0) return excluded(base, 'missingValue')
   if (denominator < MIN_RETURN_BASE) return excluded(base, 'nearZeroBase')
 
-  const cashFlowDominated = Math.abs(externalFlow) > Math.max(MIN_CASH_FLOW_DOMINANCE_ABS, startValue * CASH_FLOW_DOMINANCE_MULTIPLE)
-  if (cashFlowDominated) {
-    return excluded(base, 'cashFlowDominated')
-  }
-
   const returnPct = (endValue + event.income - event.expense - startValue - externalFlow) / denominator
   if (!Number.isFinite(returnPct)) return excluded(base, 'nonFinite')
+  const largeExternalFlow = Math.abs(externalFlow) > Math.max(MIN_CASH_FLOW_DOMINANCE_ABS, Math.max(startValue, MIN_RETURN_BASE) * CASH_FLOW_DOMINANCE_MULTIPLE)
+  if (largeExternalFlow && Math.abs(returnPct) > MAX_CASH_FLOW_DOMINATED_RETURN) return excluded(base, 'cashFlowDominated')
   if (Math.abs(returnPct) > MAX_INTERVAL_RETURN) return excluded(base, 'extremeReturn')
 
   return { ...base, returnPct, validForTwr: true }
@@ -475,23 +509,41 @@ function benchmarkValue(point: MarketPriceHistoryPoint) {
   return value > 0 ? value : null
 }
 
-function closestBenchmarkPoint(history: MarketPriceHistoryPoint[], date: string, startIndex: number) {
+type NormalizedBenchmarkPoint = {
+  date: string
+  price: number
+  fetchedAt: string
+}
+
+function normalizeBenchmarkHistory(history: MarketPriceHistoryPoint[]) {
+  const byDate = new Map<string, NormalizedBenchmarkPoint>()
+  for (const point of history) {
+    const date = dateKey(point.price_date)
+    const price = benchmarkValue(point)
+    if (!date || price == null) continue
+    const normalized = { date, price, fetchedAt: String(point.fetched_at ?? '') }
+    const current = byDate.get(date)
+    if (!current || normalized.fetchedAt.localeCompare(current.fetchedAt) >= 0) byDate.set(date, normalized)
+  }
+  return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date))
+}
+
+function closestBenchmarkPoint(history: NormalizedBenchmarkPoint[], date: string, startIndex: number) {
   let index = startIndex
-  while (index < history.length - 1 && history[index + 1].price_date <= date) index += 1
+  while (index < history.length - 1 && history[index + 1].date <= date) index += 1
   const point = history[index]
-  if (!point || point.price_date > date || daysBetween(point.price_date, date) > BENCHMARK_STALE_DAYS) return { point: null, index }
+  if (!point || point.date > date || daysBetween(point.date, date) > BENCHMARK_STALE_DAYS) return { point: null, index }
   return { point, index }
 }
 
 function benchmarkRelative(curve: ReturnCurvePoint[], history: MarketPriceHistoryPoint[]) {
-  const validCurve = curve.filter((point) => Number.isFinite(point.value) && point.value >= MIN_CURVE_VALUE)
-  const benchmark = history
-    .filter((point) => benchmarkValue(point) != null)
-    .slice()
-    .sort((a, b) => a.price_date.localeCompare(b.price_date))
+  const validCurve = curve
+    .map((point) => ({ ...point, date: dateKey(point.date) }))
+    .filter((point) => point.date && Number.isFinite(point.value) && point.value >= MIN_CURVE_VALUE)
+  const benchmark = normalizeBenchmarkHistory(history)
 
   if (validCurve.length < MIN_BENCHMARK_OVERLAP_POINTS || benchmark.length < 2) {
-    return { points: [], metric: metric(null, 'Need portfolio and benchmark history.'), overlapPoints: 0 }
+    return { points: [], metric: metric(null, 'Need portfolio and benchmark history.'), overlapPoints: 0, startDate: null, endDate: null }
   }
 
   const matched: { curve: ReturnCurvePoint; benchmarkPrice: number }[] = []
@@ -499,21 +551,20 @@ function benchmarkRelative(curve: ReturnCurvePoint[], history: MarketPriceHistor
   for (const point of validCurve) {
     const match = closestBenchmarkPoint(benchmark, point.date, benchmarkIndex)
     benchmarkIndex = match.index
-    const price = match.point ? benchmarkValue(match.point) : null
-    if (price != null) matched.push({ curve: point, benchmarkPrice: price })
+    if (match.point) matched.push({ curve: point, benchmarkPrice: match.point.price })
   }
 
-  if (matched.length < MIN_BENCHMARK_OVERLAP_POINTS) return { points: [], metric: metric(null, 'Benchmark overlap too short.'), overlapPoints: matched.length }
+  if (matched.length < MIN_BENCHMARK_OVERLAP_POINTS) return { points: [], metric: metric(null, 'Benchmark overlap too short.'), overlapPoints: matched.length, startDate: matched[0]?.curve.date ?? null, endDate: matched[matched.length - 1]?.curve.date ?? null }
   const first = matched[0]
   const last = matched[matched.length - 1]
   if (daysBetween(first.curve.date, last.curve.date) < MIN_BENCHMARK_OVERLAP_DAYS) {
-    return { points: [], metric: metric(null, 'Benchmark overlap too short.', first.curve.date, last.curve.date), overlapPoints: matched.length }
+    return { points: [], metric: metric(null, 'Benchmark overlap too short.', first.curve.date, last.curve.date), overlapPoints: matched.length, startDate: first.curve.date, endDate: last.curve.date }
   }
 
   const basePortfolio = first.curve.value
   const baseBenchmark = first.benchmarkPrice
   if (!Number.isFinite(basePortfolio) || !Number.isFinite(baseBenchmark) || basePortfolio < MIN_CURVE_VALUE || baseBenchmark <= 0) {
-    return { points: [], metric: metric(null, 'Benchmark-relative baseline is invalid.', first.curve.date, last.curve.date), overlapPoints: matched.length }
+    return { points: [], metric: metric(null, 'Benchmark-relative baseline is invalid.', first.curve.date, last.curve.date), overlapPoints: matched.length, startDate: first.curve.date, endDate: last.curve.date }
   }
   const points = matched.flatMap((item) => {
     const portfolio = item.curve.value / basePortfolio * 100
@@ -528,13 +579,13 @@ function benchmarkRelative(curve: ReturnCurvePoint[], history: MarketPriceHistor
     }]
   })
 
-  if (points.length < MIN_BENCHMARK_OVERLAP_POINTS) return { points: [], metric: metric(null, 'Benchmark comparison has too few valid points.', first.curve.date, last.curve.date), overlapPoints: points.length }
+  if (points.length < MIN_BENCHMARK_OVERLAP_POINTS) return { points: [], metric: metric(null, 'Benchmark comparison has too few valid points.', first.curve.date, last.curve.date), overlapPoints: points.length, startDate: first.curve.date, endDate: last.curve.date }
   const final = points[points.length - 1]
   const relative = final.portfolio / final.benchmark - 1
   if (!Number.isFinite(relative) || Math.abs(relative) > MAX_TOTAL_RETURN || relative <= -0.95) {
-    return { points: [], metric: metric(null, 'Benchmark-relative estimate suppressed by safety guard.', first.curve.date, last.curve.date), overlapPoints: points.length }
+    return { points: [], metric: metric(null, 'Benchmark-relative estimate suppressed by safety guard.', first.curve.date, last.curve.date), overlapPoints: points.length, startDate: first.curve.date, endDate: last.curve.date }
   }
-  return { points, metric: metric(relative, undefined, first.curve.date, last.curve.date), overlapPoints: points.length }
+  return { points, metric: metric(relative, undefined, first.curve.date, last.curve.date), overlapPoints: points.length, startDate: first.curve.date, endDate: last.curve.date }
 }
 
 function buildExclusionReasonCounts(intervals: ReturnInterval[]): Record<ExclusionReason, number> {
@@ -578,6 +629,10 @@ export function buildTruePortfolioReturns(input: EngineInput): TruePortfolioRetu
     drawdownCurve: drawdowns.points,
     benchmarkRelativeCurve: benchmark.points,
     benchmarkOverlapPoints: benchmark.overlapPoints,
+    benchmarkOverlapStartDate: benchmark.startDate,
+    benchmarkOverlapEndDate: benchmark.endDate,
+    validIntervalStartDate: validIntervals[0]?.startDate ?? null,
+    validIntervalEndDate: validIntervals[validIntervals.length - 1]?.endDate ?? null,
     exclusionReasonCounts,
     exclusionReasonSummary: exclusionSummary(exclusionReasonCounts),
     returnCurveReason: curve.reason,
