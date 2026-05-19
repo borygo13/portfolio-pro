@@ -29,16 +29,22 @@ supabase/stage-c4-1-market-history.sql
 supabase/stage-c5-portfolio-intelligence.sql
 ```
 
+5. Dla Stage C5.2a Instrument Catalog uruchom addytywną migrację katalogu:
+
+```text
+supabase/stage-c5-2a-instrument-catalog.sql
+```
+
 `supabase/schema.sql` pozostaje kanonicznym snapshotem fundamentu C3.4. Starszy plik `supabase/stage-c3-price-engine.sql` jest oznaczony jako legacy i służy tylko projektom, które miały już wcześniejszą bazę C3 i potrzebowały samej tabeli `asset_prices`.
 
-5. Uruchom projekt:
+6. Uruchom projekt:
 
 ```bash
 npm install
 npm run dev
 ```
 
-6. Wejdź na:
+7. Wejdź na:
 
 ```text
 http://localhost:3000
@@ -380,4 +386,56 @@ from market_prices
 where asset_id = '<asset_id>' and source = 'manual_csv'
 order by price_date desc
 limit 20;
+```
+
+
+## Stage C5.2a - Instrument Catalog & Symbol Resolver
+
+Migracja `supabase/stage-c5-2a-instrument-catalog.sql` dodaje tabelę `instrument_catalog` z kuratorowanymi presetami symboli providerów. Katalog pomaga przy konfiguracji aktywów, backfillu, imporcie CSV i wyborze benchmarku. Nie jest to globalna wyszukiwarka instrumentów i nie odpytuje zewnętrznych API podczas wyszukiwania.
+
+Model pól:
+
+- `symbol` to symbol widoczny dla użytkownika, np. `BTC`, `ETH`, `IUSQ.DE`, `AAPL`.
+- `market_symbol` to provider-facing symbol używany przez backfill/refresh/import, np. `bitcoin`, `ethereum`, `ripple`, `iusq.de`, `aapl.us`.
+- `provider` opisuje źródło danych, obecnie głównie `coingecko` dla crypto i `stooq` dla akcji/ETF/FX.
+- `benchmark_candidate` oznacza pozycje pokazywane jako praktyczne propozycje benchmarków.
+
+RLS pozwala zalogowanym użytkownikom czytać tylko aktywne wpisy katalogu. Klient nie ma grantów do insert/update/delete katalogu.
+
+UI:
+
+```text
+Long-term -> Intelligence -> Backfill -> Preset z katalogu
+Long-term -> Intelligence -> Benchmark -> Katalog benchmarków
+```
+
+Przykłady:
+
+- `BTC` -> `bitcoin`
+- `ETH` -> `ethereum`
+- `XRP` -> `ripple`
+- `IUSQ.DE` -> `iusq.de`
+- `AAPL` -> `aapl.us`
+
+Żeby dodać kolejne presety, dodaj nową addytywną migrację z `insert into instrument_catalog (...) values (...) on conflict (provider, market_symbol) do update ...`. Nie zmieniaj ręcznie istniejących symboli użytkownika bez świadomego zastosowania presetu w UI.
+
+### SQL verification katalogu
+
+```sql
+select category, provider, count(*) as rows
+from instrument_catalog
+where is_active = true
+group by category, provider
+order by category, provider;
+
+select symbol, market_symbol, provider, category, benchmark_candidate
+from instrument_catalog
+where benchmark_candidate = true
+order by category, symbol
+limit 50;
+
+select symbol, market_symbol, provider, aliases
+from instrument_catalog
+where symbol in ('BTC', 'ETH', 'XRP', 'IUSQ.DE', 'AAPL')
+order by symbol;
 ```
