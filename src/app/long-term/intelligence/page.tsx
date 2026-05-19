@@ -413,7 +413,8 @@ export default function PortfolioIntelligencePage() {
   const csvPreview = useMemo(() => parseHistoricalPriceCsv(csvText), [csvText])
   const latestSnapshotAllocation = snapshots[snapshots.length - 1]?.allocation_breakdown ?? []
   const portfolioHistoryPoints = snapshots.filter((snapshot) => num(snapshot.total_value) > 0).length
-  const hasMonthlyReturnData = monthlyReturns.length > 0
+  const hasMonthlyReturnChartData = monthlyReturns.length >= 2
+  const singleMonthlyReturn = monthlyReturns.length === 1 ? monthlyReturns[0] : null
   const hasBenchmarkComparisonData = benchmarkComparison.length >= 2
 
   async function handleCashSubmit(event: FormEvent<HTMLFormElement>) {
@@ -727,8 +728,16 @@ export default function PortfolioIntelligencePage() {
                 </div>
                 <TrustBadge>Estimated</TrustBadge>
               </div>
-              {hasMonthlyReturnData ? <MonthlyReturnsChart data={monthlyReturns} range="MAX" /> : <EmptyState text={portfolioHistoryPoints < 2 ? 'Not enough portfolio history yet. Run portfolio historical valuation backfill.' : 'Need more monthly snapshots before monthly returns are meaningful.'} />}
-              {hasMonthlyReturnData ? <MonthlyReturnsTable rows={monthlyReturns} /> : null}
+              {hasMonthlyReturnChartData ? (
+                <>
+                  <MonthlyReturnsChart data={monthlyReturns} range="MAX" />
+                  <MonthlyReturnsTable rows={monthlyReturns} />
+                </>
+              ) : singleMonthlyReturn ? (
+                <SingleMonthlyReturnSummary row={singleMonthlyReturn} />
+              ) : (
+                <EmptyState text={portfolioHistoryPoints < 2 ? 'Not enough portfolio history yet. Run portfolio historical valuation backfill.' : 'Need more monthly snapshots before monthly returns are meaningful.'} />
+              )}
             </Card>
 
             <Card>
@@ -1241,6 +1250,28 @@ function BackfillResultPanel({ result, loading }: { result: BackfillResult | nul
           Pozostałe aktywa do kolejnego requestu: {result.remainingAssets.map((asset) => asset.symbol).join(', ')}
         </div>
       ) : null}
+    </div>
+  )
+}
+
+function SingleMonthlyReturnSummary({ row }: { row: { date: string; month: string; startValue: number; endValue: number; cashFlow: number; returnPct: number } }) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-white">Limited monthly history</p>
+          <p className="mt-1 text-sm text-slate-500">Only one monthly return is available, so the chart will appear after another month is generated.</p>
+        </div>
+        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${row.returnPct >= 0 ? 'bg-emerald-500/10 text-emerald-200' : 'bg-rose-500/10 text-rose-200'}`}>
+          {PCT.format(row.returnPct)}
+        </span>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-4">
+        <InfoLine label="Month" value={row.month} />
+        <InfoLine label="Date" value={formatDate(row.date)} />
+        <InfoLine label="Start" value={PLN.format(row.startValue)} />
+        <InfoLine label="End" value={PLN.format(row.endValue)} />
+      </div>
     </div>
   )
 }

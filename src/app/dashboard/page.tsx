@@ -194,6 +194,7 @@ function buildPriceWarnings(assets: Asset[], prices: AssetPrice[]): PriceWarning
 
 function buildAssetHistoryCurve(history: MarketPriceHistoryPoint[]) {
   return history.map((point) => ({
+    date: point.price_date,
     label: snapshotLabel(point.price_date),
     price: point.close_price_base == null ? n(point.close_price) : n(point.close_price_base),
   }))
@@ -450,7 +451,7 @@ export default function Dashboard() {
         ) : assetHistoryCurve.length === 0 ? (
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-sm text-slate-500">{selectedAsset ? `Brak historii market_prices dla ${selectedAsset.symbol}.` : 'Brak historii cen.'}</div>
         ) : (
-          <AssetHistoryChart data={assetHistoryCurve} />
+          <AssetHistoryChart data={assetHistoryCurve} range={assetHistoryRange} />
         )}
       </Card>
 
