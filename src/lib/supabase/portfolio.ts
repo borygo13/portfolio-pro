@@ -31,6 +31,8 @@ export type CreateAssetInput = {
   asset_type: AssetType
   currency: string
   target_allocation: number
+  market_symbol?: string | null
+  price_source?: string | null
 }
 
 export type InstrumentCatalogRow = {
@@ -119,6 +121,8 @@ export async function createAsset(portfolioId: string, input: CreateAssetInput):
     asset_type: input.asset_type,
     currency: input.currency.trim().toUpperCase(),
     target_allocation: input.target_allocation || 0,
+    market_symbol: input.market_symbol?.trim() || null,
+    price_source: input.price_source?.trim() || 'auto',
   }
 
   const { data, error } = await supabase

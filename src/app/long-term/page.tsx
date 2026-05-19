@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Database, Loader2, Plus, RefreshCw, Save, Target, Trash2, TrendingUp, Wallet, X, Zap } from 'lucide-react'
+import { CheckCircle2, Database, Loader2, Plus, RefreshCw, Save, Search, Target, Trash2, TrendingUp, Wallet, X, Zap } from 'lucide-react'
 import { Shell, PageHeader, Card, StatCard, TrustBadge, FeatureNote } from '@/components/Shell'
 import { AllocationChart } from '@/components/Charts'
 import { PLN, PLN2, PCT } from '@/lib/format'
@@ -12,12 +12,14 @@ import {
   getDefaultPortfolio,
   listAssets,
   listAssetPrices,
+  listInstrumentCatalog,
   listTransactions,
   updateAsset,
   upsertAssetPrice,
   type Asset,
   type AssetPrice,
   type AssetType,
+  type InstrumentCatalogRow,
   type Portfolio,
   type Transaction,
 } from '@/lib/supabase/portfolio'
@@ -29,6 +31,19 @@ type AssetForm = {
   asset_type: AssetType
   currency: string
   target_allocation: string
+  market_symbol: string
+  price_source: string
+}
+
+type BackfillRange = '1Y' | '3Y' | '5Y' | 'MAX'
+
+type SmartAssetResult = {
+  symbol: string
+  status: 'success' | 'warning'
+  message: string
+  rows?: number
+  provider?: string
+  sourceSymbol?: string
 }
 
 const emptyAssetForm: AssetForm = {
@@ -37,13 +52,46 @@ const emptyAssetForm: AssetForm = {
   asset_type: 'ETF',
   currency: 'PLN',
   target_allocation: '0',
+  market_symbol: '',
+  price_source: 'auto',
 }
 
 const assetTypes: AssetType[] = ['ETF', 'Akcje', 'Obligacje', 'Gotówka', 'Crypto', 'CFD', 'Inne']
 const currencies = ['PLN', 'EUR', 'USD', 'GBP', 'CHF']
+const backfillRanges: BackfillRange[] = ['1Y', '3Y', '5Y', 'MAX']
+const automaticHistoryFallback = 'Could not fetch history automatically. Use CSV import in Intelligence → Backfill.'
 
 function toNumber(value: string) {
   return Number(String(value || '0').replace(',', '.'))
+}
+
+function normalizeCatalogQuery(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+function filterCatalogPresets(rows: InstrumentCatalogRow[], query: string) {
+  const terms = normalizeCatalogQuery(query).split(/\s+/).filter(Boolean)
+  if (terms.length === 0) return rows.slice(0, 6)
+
+  return rows.filter((row) => {
+    const haystack = normalizeCatalogQuery([
+      row.name,
+      row.symbol,
+      row.market_symbol,
+      row.provider,
+      row.category,
+      ...(row.aliases ?? []),
+    ].join(' '))
+    return terms.every((term) => haystack.includes(term))
+  }).slice(0, 6)
+}
+
+function isHistoryEligible(assetType: AssetType) {
+  return assetType !== 'Gotówka' && assetType !== 'Obligacje'
 }
 
 export default function LongTermPage() {
@@ -62,10 +110,19 @@ export default function LongTermPage() {
   const [success, setSuccess] = useState<string | null>(null)
   const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({})
   const [assetForm, setAssetForm] = useState<AssetForm>(emptyAssetForm)
+  const [instrumentCatalog, setInstrumentCatalog] = useState<InstrumentCatalogRow[]>([])
+  const [catalogQuery, setCatalogQuery] = useState('')
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
+  const [fetchHistoryAfterAdd, setFetchHistoryAfterAdd] = useState(false)
+  const [backfillRange, setBackfillRange] = useState<BackfillRange>('1Y')
+  const [backfillLoadingAssetId, setBackfillLoadingAssetId] = useState<string | null>(null)
+  const [assetFlowResult, setAssetFlowResult] = useState<SmartAssetResult | null>(null)
 
   const positions = useMemo(() => buildPositions(assets, transactions, prices), [assets, transactions, prices])
   const summary = useMemo(() => portfolioSummary(positions), [positions])
   const allocation = positions.filter((p) => p.currentValue > 0).map((p) => ({ name: p.asset.symbol, value: p.currentValue }))
+  const catalogResults = useMemo(() => filterCatalogPresets(instrumentCatalog, catalogQuery), [instrumentCatalog, catalogQuery])
+  const historyFetchEnabled = !editingAssetId && fetchHistoryAfterAdd && isHistoryEligible(assetForm.asset_type)
 
   async function loadData() {
     setLoading(true)
@@ -84,6 +141,12 @@ export default function LongTermPage() {
       setTransactions(txList)
       setPrices(priceList)
       setPriceDrafts(Object.fromEntries(priceList.map((p) => [p.asset_id, String(p.price)])))
+
+      try {
+        setInstrumentCatalog(await listInstrumentCatalog())
+      } catch {
+        setInstrumentCatalog([])
+      }
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się pobrać pozycji.')
     } finally {
@@ -97,6 +160,9 @@ export default function LongTermPage() {
     setAssetForm(emptyAssetForm)
     setEditingAssetId(null)
     setShowAssetForm(true)
+    setSelectedPresetId(null)
+    setCatalogQuery('')
+    setFetchHistoryAfterAdd(false)
   }
 
   function startEdit(asset: Asset) {
@@ -106,10 +172,89 @@ export default function LongTermPage() {
       asset_type: (asset.asset_type as AssetType) ?? 'ETF',
       currency: asset.currency ?? 'PLN',
       target_allocation: String(asset.target_allocation ?? 0),
+      market_symbol: asset.market_symbol ?? '',
+      price_source: asset.price_source ?? 'auto',
     })
     setEditingAssetId(asset.id)
     setShowAssetForm(true)
+    setSelectedPresetId(null)
+    setCatalogQuery('')
+    setFetchHistoryAfterAdd(false)
     window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function applyCatalogPreset(preset: InstrumentCatalogRow) {
+    const presetType = preset.asset_type as AssetType
+    setAssetForm((current) => ({
+      ...current,
+      symbol: preset.symbol,
+      name: preset.name,
+      asset_type: presetType,
+      currency: preset.currency,
+      market_symbol: preset.market_symbol,
+      price_source: preset.provider,
+    }))
+    setCatalogQuery(`${preset.symbol} ${preset.name}`)
+    setSelectedPresetId(preset.id)
+    if (!isHistoryEligible(presetType)) setFetchHistoryAfterAdd(false)
+  }
+
+  async function runBackfillForCreatedAsset(created: Asset): Promise<SmartAssetResult> {
+    setBackfillLoadingAssetId(created.id)
+    const timeout = new AbortController()
+    const timeoutId = window.setTimeout(() => timeout.abort(), 75000)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const response = await fetch('/api/prices/backfill', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionData.session?.access_token ? { Authorization: `Bearer ${sessionData.session.access_token}` } : {}),
+        },
+        body: JSON.stringify({
+          scope: 'asset',
+          portfolio_id: created.portfolio_id,
+          asset_id: created.id,
+          range: backfillRange,
+        }),
+        signal: timeout.signal,
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(payload?.error ?? automaticHistoryFallback)
+
+      const item = payload?.results?.[0]
+      const savedRows = Number(item?.persistedRows ?? 0)
+      if (!item || item.error || item.status === 'failed') {
+        return {
+          symbol: created.symbol,
+          status: 'warning',
+          message: `${automaticHistoryFallback}${item?.error ? ` ${item.error}` : ''}`,
+          rows: savedRows,
+          provider: item?.provider,
+          sourceSymbol: item?.sourceSymbol,
+        }
+      }
+
+      return {
+        symbol: created.symbol,
+        status: item.status === 'partial' ? 'warning' : 'success',
+        message: item.status === 'partial'
+          ? `Historia częściowo pobrana dla ${created.symbol}.`
+          : `Historia pobrana dla ${created.symbol}.`,
+        rows: savedRows,
+        provider: item.provider,
+        sourceSymbol: item.sourceSymbol,
+      }
+    } catch (err: any) {
+      return {
+        symbol: created.symbol,
+        status: 'warning',
+        message: `${automaticHistoryFallback}${err?.name === 'AbortError' ? ' Request timed out.' : err?.message ? ` ${err.message}` : ''}`,
+      }
+    } finally {
+      window.clearTimeout(timeoutId)
+      setBackfillLoadingAssetId(null)
+    }
   }
 
   async function saveAsset() {
@@ -117,11 +262,13 @@ export default function LongTermPage() {
     setSavingAsset(true)
     setError(null)
     setSuccess(null)
+    setAssetFlowResult(null)
     try {
       const target = toNumber(assetForm.target_allocation)
       if (!assetForm.symbol.trim()) throw new Error('Symbol jest wymagany.')
       if (!assetForm.name.trim()) throw new Error('Nazwa aktywa jest wymagana.')
       if (!Number.isFinite(target) || target < 0 || target > 100) throw new Error('Target alokacji musi być od 0 do 100%.')
+      const shouldFetchHistory = historyFetchEnabled
 
       const payload = {
         symbol: assetForm.symbol,
@@ -129,6 +276,8 @@ export default function LongTermPage() {
         asset_type: assetForm.asset_type,
         currency: assetForm.currency,
         target_allocation: target,
+        market_symbol: assetForm.market_symbol,
+        price_source: assetForm.price_source,
       }
 
       if (editingAssetId) {
@@ -139,9 +288,35 @@ export default function LongTermPage() {
         const created = await createAsset(portfolio.id, payload)
         setAssets((current) => [created, ...current])
         setSuccess(`Dodano ${created.symbol}.`)
+        setAssetFlowResult({
+          symbol: created.symbol,
+          status: 'success',
+          message: `Utworzono aktywo ${created.symbol}.`,
+          provider: created.price_source ?? undefined,
+          sourceSymbol: created.market_symbol ?? undefined,
+        })
+        setAssetForm(emptyAssetForm)
+        setEditingAssetId(null)
+        setSelectedPresetId(null)
+        setCatalogQuery('')
+        setFetchHistoryAfterAdd(false)
+
+        if (shouldFetchHistory) {
+          setSavingAsset(false)
+          const backfillResult = await runBackfillForCreatedAsset(created)
+          setAssetFlowResult(backfillResult)
+          if (backfillResult.status === 'success') {
+            setSuccess(`Dodano ${created.symbol}. Pobrano ${backfillResult.rows ?? 0} wierszy historii.`)
+          } else {
+            setSuccess(`Dodano ${created.symbol}.`)
+          }
+        }
       }
       setAssetForm(emptyAssetForm)
       setEditingAssetId(null)
+      setSelectedPresetId(null)
+      setCatalogQuery('')
+      setFetchHistoryAfterAdd(false)
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się zapisać aktywa.')
     } finally {
@@ -252,6 +427,22 @@ export default function LongTermPage() {
 
       {error ? <div className="mt-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
       {success ? <div className="mt-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">{success}</div> : null}
+      {backfillLoadingAssetId ? <div className="mt-6 flex items-center gap-2 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 text-sm text-cyan-100"><Loader2 className="animate-spin" size={16} /> Fetching historical prices...</div> : null}
+      {assetFlowResult ? (
+        <div className={`mt-6 rounded-2xl border p-4 text-sm ${assetFlowResult.status === 'success' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100' : 'border-amber-500/20 bg-amber-500/10 text-amber-100'}`}>
+          <div className="flex items-start gap-2">
+            <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
+            <div>
+              <p className="font-semibold">{assetFlowResult.message}</p>
+              <p className="mt-1 text-xs opacity-80">
+                {assetFlowResult.rows !== undefined ? `${assetFlowResult.rows} saved rows` : 'Asset creation completed'}
+                {assetFlowResult.provider ? ` · ${assetFlowResult.provider}` : ''}
+                {assetFlowResult.sourceSymbol ? ` · ${assetFlowResult.sourceSymbol}` : ''}
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="mt-6 grid gap-6 2xl:grid-cols-[1.4fr_.7fr]">
         <div className="space-y-6">
@@ -259,7 +450,7 @@ export default function LongTermPage() {
             <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
               <div>
                 <h3 className="text-lg font-bold text-white">Aktywa</h3>
-                <p className="mt-1 text-sm text-slate-500">Dodawaj aktywa ręcznie. Opcję PRO z autocomplete/tickerami zrobimy później jako osobny upgrade.</p>
+                <p className="mt-1 text-sm text-slate-500">Dodawaj aktywa ręcznie albo zacznij od presetu katalogu.</p>
               </div>
               <button onClick={resetAssetForm} className="inline-flex items-center justify-center gap-2 rounded-2xl bg-violet-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-950/40 transition hover:bg-violet-400">
                 <Plus size={16} /> Dodaj aktywo
@@ -270,11 +461,37 @@ export default function LongTermPage() {
               <div className="mb-5 rounded-3xl border border-white/10 bg-white/[0.03] p-4">
                 <div className="mb-4 flex items-center justify-between">
                   <h4 className="font-bold text-white">{editingAssetId ? 'Edytuj aktywo' : 'Nowe aktywo'}</h4>
-                  <button onClick={() => { setShowAssetForm(false); setEditingAssetId(null); setAssetForm(emptyAssetForm) }} className="rounded-xl p-2 text-slate-400 hover:bg-white/10 hover:text-white">
+                  <button onClick={() => { setShowAssetForm(false); setEditingAssetId(null); setAssetForm(emptyAssetForm); setSelectedPresetId(null); setCatalogQuery(''); setFetchHistoryAfterAdd(false) }} className="rounded-xl p-2 text-slate-400 hover:bg-white/10 hover:text-white">
                     <X size={16} />
                   </button>
                 </div>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                {!editingAssetId ? (
+                  <div className="mb-4 rounded-2xl border border-white/10 bg-slate-950/50 p-4">
+                    <label className="space-y-2">
+                      <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500"><Search size={14} /> Katalog</span>
+                      <input value={catalogQuery} onChange={(e) => { setCatalogQuery(e.target.value); setSelectedPresetId(null) }} className="input w-full px-4 py-3" placeholder="BTC, IUSQ, Nasdaq, Apple" />
+                    </label>
+                    <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                      {catalogResults.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => applyCatalogPreset(preset)}
+                          className={`rounded-2xl border p-3 text-left transition ${selectedPresetId === preset.id ? 'border-cyan-300/50 bg-cyan-500/10' : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.06]'}`}
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-semibold text-white">{preset.symbol}</span>
+                            <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-xs font-semibold text-cyan-200">{preset.market_symbol}</span>
+                          </div>
+                          <p className="mt-1 truncate text-sm text-slate-300">{preset.name}</p>
+                          <p className="mt-1 text-xs text-slate-500">{preset.provider} · {preset.category.replaceAll('_', ' ')} · {preset.currency}</p>
+                        </button>
+                      ))}
+                    </div>
+                    {catalogResults.length === 0 ? <p className="mt-3 text-sm text-slate-500">Brak presetów dla tej frazy.</p> : null}
+                  </div>
+                ) : null}
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
                   <label className="space-y-2">
                     <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Symbol</span>
                     <input value={assetForm.symbol} onChange={(e) => setAssetForm((f) => ({ ...f, symbol: e.target.value }))} className="input w-full px-4 py-3" placeholder="np. iusq.de" />
@@ -285,7 +502,11 @@ export default function LongTermPage() {
                   </label>
                   <label className="space-y-2">
                     <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Typ</span>
-                    <select value={assetForm.asset_type} onChange={(e) => setAssetForm((f) => ({ ...f, asset_type: e.target.value as AssetType }))} className="input w-full px-4 py-3">
+                    <select value={assetForm.asset_type} onChange={(e) => {
+                      const nextType = e.target.value as AssetType
+                      setAssetForm((f) => ({ ...f, asset_type: nextType }))
+                      if (!isHistoryEligible(nextType)) setFetchHistoryAfterAdd(false)
+                    }} className="input w-full px-4 py-3">
                       {assetTypes.map((type) => <option key={type}>{type}</option>)}
                     </select>
                   </label>
@@ -299,7 +520,40 @@ export default function LongTermPage() {
                     <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Target %</span>
                     <input value={assetForm.target_allocation} onChange={(e) => setAssetForm((f) => ({ ...f, target_allocation: e.target.value }))} className="input w-full px-4 py-3" inputMode="decimal" placeholder="np. 55" />
                   </label>
+                  <label className="space-y-2 xl:col-span-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Provider symbol</span>
+                    <input value={assetForm.market_symbol} onChange={(e) => setAssetForm((f) => ({ ...f, market_symbol: e.target.value }))} className="input w-full px-4 py-3" placeholder="bitcoin / iusq.de / aapl.us" />
+                  </label>
+                  <label className="space-y-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Provider</span>
+                    <input value={assetForm.price_source} onChange={(e) => setAssetForm((f) => ({ ...f, price_source: e.target.value }))} className="input w-full px-4 py-3" placeholder="auto" />
+                  </label>
                 </div>
+                {!editingAssetId ? (
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                      <label className="flex items-center gap-3 text-sm font-semibold text-slate-200">
+                        <input
+                          type="checkbox"
+                          checked={fetchHistoryAfterAdd}
+                          disabled={!isHistoryEligible(assetForm.asset_type)}
+                          onChange={(e) => setFetchHistoryAfterAdd(e.target.checked)}
+                          className="h-4 w-4 rounded border-white/20 bg-slate-950 text-violet-500"
+                        />
+                        Fetch historical prices after adding
+                      </label>
+                      <select
+                        value={backfillRange}
+                        disabled={!fetchHistoryAfterAdd || !isHistoryEligible(assetForm.asset_type)}
+                        onChange={(e) => setBackfillRange(e.target.value as BackfillRange)}
+                        className="input w-full px-4 py-3 md:w-40"
+                      >
+                        {backfillRanges.map((range) => <option key={range}>{range}</option>)}
+                      </select>
+                    </div>
+                    {!isHistoryEligible(assetForm.asset_type) ? <p className="mt-2 text-xs text-slate-500">Historia rynku jest dostępna dla aktywów rynkowych, nie dla gotówki ani obligacji.</p> : null}
+                  </div>
+                ) : null}
                 <div className="mt-4 flex flex-wrap justify-end gap-2">
                   {editingAssetId ? (
                     <button onClick={resetAssetForm} className="rounded-2xl bg-white/10 px-4 py-3 text-sm font-semibold text-slate-200 transition hover:bg-white/15">Anuluj edycję</button>
@@ -330,7 +584,7 @@ export default function LongTermPage() {
                     const txCount = transactions.filter((tx) => tx.asset_id === asset.id).length
                     return (
                       <tr key={asset.id} className="border-t border-white/10 text-slate-300 transition hover:bg-white/[0.03]">
-                        <td className="p-4"><div className="font-semibold text-white">{asset.symbol}</div><div className="text-xs text-slate-500">{asset.name}</div></td>
+                        <td className="p-4"><div className="font-semibold text-white">{asset.symbol}</div><div className="text-xs text-slate-500">{asset.name}</div>{asset.market_symbol ? <div className="mt-1 text-xs text-cyan-200/80">{asset.price_source ?? 'auto'} · {asset.market_symbol}</div> : null}</td>
                         <td className="p-4">{asset.asset_type}</td>
                         <td className="p-4 text-right">{asset.currency}</td>
                         <td className="p-4 text-right">{Number(asset.target_allocation ?? 0).toFixed(1)}%</td>
