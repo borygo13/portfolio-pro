@@ -26,6 +26,7 @@ import {
 import {
   buildTruePortfolioReturns,
   type ReturnMetric,
+  type ReturnSanityDiagnostics,
 } from '@/lib/portfolio-returns'
 import { buildPositions, portfolioSummary } from '@/lib/position-engine'
 import {
@@ -34,6 +35,7 @@ import {
   type CsvImportPreview,
   type CsvImportSourceLabel,
 } from '@/lib/market/csv-import'
+import { providerStatusForAsset, type ProviderStatus } from '@/lib/market/provider-diagnostics'
 import { supabase } from '@/lib/supabase/client'
 import {
   applyInstrumentPresetToAsset,
@@ -42,6 +44,7 @@ import {
   deleteCashLedgerEntry,
   deleteDividend,
   getDefaultPortfolio,
+  getMarketPriceDiagnostics,
   getPortfolioBenchmark,
   listBenchmarkCandidates,
   listInstrumentCatalog,
@@ -62,6 +65,7 @@ import {
   type DividendRecord,
   type EdoBond,
   type InstrumentCatalogRow,
+  type MarketPriceDiagnostics,
   type MarketPriceHistoryPoint,
   type Portfolio,
   type PortfolioBenchmark,
@@ -187,6 +191,30 @@ function diagnosticCount(count: number, startDate: string | null | undefined, en
   return range ? `${count} · ${range}` : String(count)
 }
 
+function confidenceLabel(value: 'high' | 'limited' | 'low' | undefined) {
+  if (value === 'high') return 'High confidence'
+  if (value === 'limited') return 'Limited'
+  return 'Low confidence'
+}
+
+function confidenceTone(value: 'high' | 'limited' | 'low' | undefined) {
+  if (value === 'high') return 'text-emerald-200 bg-emerald-500/10'
+  if (value === 'limited') return 'text-amber-200 bg-amber-500/10'
+  return 'text-rose-200 bg-rose-500/10'
+}
+
+function qualityLabel(value: MarketPriceDiagnostics['quality'] | undefined) {
+  if (value === 'ready') return 'Ready'
+  if (value === 'limited') return 'Limited'
+  return 'Missing'
+}
+
+function qualityTone(value: MarketPriceDiagnostics['quality'] | undefined) {
+  if (value === 'ready') return 'text-emerald-200 bg-emerald-500/10'
+  if (value === 'limited') return 'text-amber-200 bg-amber-500/10'
+  return 'text-rose-200 bg-rose-500/10'
+}
+
 function directionLabel(value: string) {
   if (value === 'buy') return 'Dokup'
   if (value === 'trim') return 'Redukuj'
@@ -258,8 +286,9 @@ function returnMetricValue(metric: ReturnMetric) {
 
 function returnMetricSub(metric: ReturnMetric, fallback = 'true return engine') {
   if (!metric.available) return metric.reason ?? 'Limited data'
-  if (metric.startDate && metric.endDate) return `${formatDate(metric.startDate)} → ${formatDate(metric.endDate)}`
-  return fallback
+  const suffix = metric.confidence && metric.confidence !== 'high' ? ` · ${confidenceLabel(metric.confidence)}` : ''
+  if (metric.startDate && metric.endDate) return `${formatDate(metric.startDate)} → ${formatDate(metric.endDate)}${suffix}`
+  return `${fallback}${suffix}`
 }
 
 function returnMetricTone(metric: ReturnMetric, positiveIsGood = true) {
@@ -294,6 +323,9 @@ export default function PortfolioIntelligencePage() {
   const [backfillAssetId, setBackfillAssetId] = useState('')
   const [backfillLoading, setBackfillLoading] = useState(false)
   const [backfillResult, setBackfillResult] = useState<BackfillResult | null>(null)
+  const [marketDiagnostics, setMarketDiagnostics] = useState<MarketPriceDiagnostics | null>(null)
+  const [marketDiagnosticsLoading, setMarketDiagnosticsLoading] = useState(false)
+  const [marketDiagnosticsError, setMarketDiagnosticsError] = useState<string | null>(null)
   const [portfolioHistoryRange, setPortfolioHistoryRange] = useState<BackfillRange>('1Y')
   const [portfolioHistoryLoading, setPortfolioHistoryLoading] = useState(false)
   const [portfolioHistoryResult, setPortfolioHistoryResult] = useState<PortfolioHistoryBackfillResult | null>(null)
@@ -415,6 +447,33 @@ export default function PortfolioIntelligencePage() {
     return () => { cancelled = true }
   }, [portfolio?.id, benchmarkAssetId])
 
+  useEffect(() => {
+    if (!portfolio?.id || !backfillAssetId) {
+      setMarketDiagnostics(null)
+      setMarketDiagnosticsError(null)
+      return
+    }
+
+    let cancelled = false
+    setMarketDiagnosticsLoading(true)
+    setMarketDiagnosticsError(null)
+    getMarketPriceDiagnostics(portfolio.id, backfillAssetId)
+      .then((diagnostics) => {
+        if (!cancelled) setMarketDiagnostics(diagnostics)
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          setMarketDiagnostics(null)
+          setMarketDiagnosticsError(err?.message ?? 'Nie udało się pobrać diagnostyki market_prices.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setMarketDiagnosticsLoading(false)
+      })
+
+    return () => { cancelled = true }
+  }, [portfolio?.id, backfillAssetId])
+
   const baseCurrency = asCurrency(portfolio?.currency)
   const positions = useMemo(() => buildPositions(assets, transactions, prices), [assets, transactions, prices])
   const activePositions = useMemo(() => positions.filter((position) => position.quantity > 0.00000001), [positions])
@@ -451,6 +510,7 @@ export default function PortfolioIntelligencePage() {
   const selectedBenchmark = assets.find((asset) => asset.id === benchmarkAssetId) ?? null
   const selectedBackfillAsset = marketAssets.find((asset) => asset.id === backfillAssetId) ?? null
   const selectedBackfillSymbol = providerSymbolHint(selectedBackfillAsset, selectedBackfillAsset ? marketSymbolDrafts[selectedBackfillAsset.id] ?? '' : '')
+  const selectedProviderStatus = useMemo(() => providerStatusForAsset(selectedBackfillAsset), [selectedBackfillAsset])
   const backfillCatalogResults = useMemo(() => filterCatalogPresets(instrumentCatalog, catalogQuery), [instrumentCatalog, catalogQuery])
   const benchmarkCatalogResults = useMemo(() => filterCatalogPresets(benchmarkCatalog, benchmarkCatalogQuery), [benchmarkCatalog, benchmarkCatalogQuery])
   const selectedCsvImportAsset = marketAssets.find((asset) => asset.id === csvImportAssetId) ?? null
@@ -593,6 +653,7 @@ export default function PortfolioIntelligencePage() {
 
       setBackfillResult(result as BackfillResult)
       setPrices(await listAssetPrices(portfolio.id))
+      if (backfillAssetId) setMarketDiagnostics(await getMarketPriceDiagnostics(portfolio.id, backfillAssetId))
       if (benchmarkAssetId) setBenchmarkHistory(await listMarketPriceHistory(portfolio.id, benchmarkAssetId, 'MAX'))
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się wykonać historical backfill.')
@@ -687,6 +748,7 @@ export default function PortfolioIntelligencePage() {
       if (!response.ok) throw new Error(result?.error ?? 'Nie udało się zaimportować CSV.')
 
       setCsvImportResult(result as CsvImportResult)
+      if (backfillAssetId === csvImportAssetId) setMarketDiagnostics(await getMarketPriceDiagnostics(portfolio.id, csvImportAssetId))
       if (benchmarkAssetId === csvImportAssetId) setBenchmarkHistory(await listMarketPriceHistory(portfolio.id, benchmarkAssetId, 'MAX'))
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się zaimportować historii cen z CSV.')
@@ -748,7 +810,7 @@ export default function PortfolioIntelligencePage() {
       {activeTab === 'overview' ? (
         <div className="space-y-6">
           <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-            <StatCard icon={Percent} label="TWR return" value={returnMetricValue(trueReturns.twrReturn)} sub={returnMetricSub(trueReturns.twrReturn, 'cash-flow neutral')} tone={returnMetricTone(trueReturns.twrReturn)} />
+            <StatCard icon={Percent} label="TWR estimate" value={returnMetricValue(trueReturns.twrReturn)} sub={returnMetricSub(trueReturns.twrReturn, 'cash-flow neutral')} tone={returnMetricTone(trueReturns.twrReturn)} />
             <StatCard icon={TrendingUp} label="CAGR" value={returnMetricValue(trueReturns.cagr)} sub={returnMetricSub(trueReturns.cagr, 'annualized TWR')} tone={returnMetricTone(trueReturns.cagr)} />
             <StatCard icon={Scale} label="MWR approx." value={returnMetricValue(trueReturns.mwrApprox)} sub={returnMetricSub(trueReturns.mwrApprox, 'Modified Dietz estimate')} tone={returnMetricTone(trueReturns.mwrApprox)} />
             <StatCard icon={BarChart3} label="Benchmark relative" value={returnMetricValue(trueReturns.benchmarkRelativeReturn)} sub={returnMetricSub(trueReturns.benchmarkRelativeReturn, 'common overlap')} tone={returnMetricTone(trueReturns.benchmarkRelativeReturn)} />
@@ -766,6 +828,8 @@ export default function PortfolioIntelligencePage() {
               True return engine limited data: {trueReturns.summaryReason}
             </div>
           ) : null}
+
+          <ReturnDiagnosticsPanel diagnostics={trueReturns.sanityDiagnostics} />
 
           <div className="grid gap-3 md:grid-cols-5">
             <InfoLine label="Valid TWR intervals" value={diagnosticCount(trueReturns.validIntervals.length, trueReturns.validIntervalStartDate, trueReturns.validIntervalEndDate)} />
@@ -1029,6 +1093,13 @@ export default function PortfolioIntelligencePage() {
                       onApply={handleApplyPreset}
                     />
                   </div>
+                  <MarketDataQualityPanel
+                    asset={selectedBackfillAsset}
+                    provider={selectedProviderStatus}
+                    diagnostics={marketDiagnostics}
+                    loading={marketDiagnosticsLoading}
+                    error={marketDiagnosticsError}
+                  />
                 </div>
               ) : null}
 
@@ -1164,6 +1235,90 @@ function Select({ value, onChange, children }: { value: string; onChange: (value
 
 function SubmitButton({ children, disabled }: { children: ReactNode; disabled?: boolean }) {
   return <button disabled={disabled} className="inline-flex items-center gap-2 rounded-2xl bg-violet-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-950/40 transition hover:bg-violet-400 disabled:cursor-not-allowed disabled:opacity-50">{children}</button>
+}
+
+function ReturnDiagnosticsPanel({ diagnostics }: { diagnostics: ReturnSanityDiagnostics }) {
+  const reasons = diagnostics.confidenceReasons.length > 0 ? diagnostics.confidenceReasons.join(' · ') : 'stable interval coverage'
+  const largeFlows = diagnostics.largeCashFlowDates.length > 0
+    ? diagnostics.largeCashFlowDates.map((item) => `${formatDate(item.date)} ${PLN.format(item.amount)}`).join(' · ')
+    : 'none detected'
+
+  return (
+    <Card>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-bold text-white">Return confidence</h3>
+          <p className="mt-1 text-sm text-slate-500">Snapshot-based sanity checks compare raw portfolio growth, contributions, and valid TWR intervals.</p>
+        </div>
+        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${confidenceTone(diagnostics.confidence)}`}>{confidenceLabel(diagnostics.confidence)}</span>
+      </div>
+      <div className="mt-5 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+        <InfoLine label="Portfolio value" value={`${diagnostics.startPortfolioValue == null ? '—' : PLN.format(diagnostics.startPortfolioValue)} → ${diagnostics.endPortfolioValue == null ? '—' : PLN.format(diagnostics.endPortfolioValue)}`} />
+        <InfoLine label="Contribution" value={`${diagnostics.startContribution == null ? '—' : PLN.format(diagnostics.startContribution)} → ${diagnostics.endContribution == null ? '—' : PLN.format(diagnostics.endContribution)}`} />
+        <InfoLine label="Nominal growth" value={formatPct(diagnostics.nominalGrowthPct)} />
+        <InfoLine label="Adjusted growth" value={formatPct(diagnostics.contributionAdjustedGrowthPct)} />
+        <InfoLine label="Net cash flow" value={`${diagnostics.startNetCashFlow == null ? '—' : PLN.format(diagnostics.startNetCashFlow)} → ${diagnostics.endNetCashFlow == null ? '—' : PLN.format(diagnostics.endNetCashFlow)}`} />
+        <InfoLine label="Flow impact" value={formatPct(diagnostics.flowImpactRatio)} />
+        <InfoLine label="Main driver" value={diagnostics.performanceDriver} />
+        <InfoLine label="Confidence note" value={reasons} />
+      </div>
+      <details className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
+        <summary className="cursor-pointer font-semibold text-white">Large cash-flow dates</summary>
+        <p className="mt-3 leading-6">{largeFlows}</p>
+      </details>
+    </Card>
+  )
+}
+
+function MarketDataQualityPanel({ asset, provider, diagnostics, loading, error }: {
+  asset: Asset
+  provider: ProviderStatus
+  diagnostics: MarketPriceDiagnostics | null
+  loading: boolean
+  error: string | null
+}) {
+  const sourceDistribution = diagnostics?.sourceDistribution.length
+    ? diagnostics.sourceDistribution.map((item) => `${item.source} ${item.count}`).join(' · ')
+    : '—'
+  const warnings = diagnostics?.warnings.length ? diagnostics.warnings : []
+  const stooqWarning = provider.provider.includes('stooq') && diagnostics?.quality !== 'ready'
+
+  return (
+    <div className="mt-4 border-t border-white/10 pt-4">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-white">Market data quality</p>
+          <p className="mt-1 text-xs text-slate-500">Provider diagnostics for backfill and portfolio history readiness.</p>
+        </div>
+        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${qualityTone(diagnostics?.quality)}`}>{loading ? 'Loading' : qualityLabel(diagnostics?.quality)}</span>
+      </div>
+
+      {error ? <p className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-3 text-sm text-rose-100">{error}</p> : null}
+      <div className="grid gap-3 md:grid-cols-2">
+        <InfoLine label="Provider" value={provider.provider} />
+        <InfoLine label="Market symbol" value={asset.market_symbol || asset.symbol} />
+        <InfoLine label="Stored source symbol" value={diagnostics?.sourceSymbol ?? '—'} />
+        <InfoLine label="Rows" value={diagnostics ? String(diagnostics.rowCount) : '—'} />
+        <InfoLine label="Date range" value={diagnostics?.minPriceDate && diagnostics.maxPriceDate ? `${formatDate(diagnostics.minPriceDate)} → ${formatDate(diagnostics.maxPriceDate)}` : '—'} />
+        <InfoLine label="Latest price" value={diagnostics?.latestPriceDate ? formatDate(diagnostics.latestPriceDate) : '—'} />
+        <InfoLine label="Recent gap" value={diagnostics?.recentCalendarGapDays == null ? '—' : `${diagnostics.recentCalendarGapDays} calendar days · ${diagnostics.missingRecentTradingDays} weekdays`} />
+        <InfoLine label="Recent history gaps" value={diagnostics ? `${diagnostics.recentGapCount} · max ${diagnostics.maxRecentGapDays} days` : '—'} />
+        <InfoLine label="Base price rows" value={diagnostics ? `${diagnostics.basePriceRows}/${diagnostics.rowCount}` : '—'} />
+        <InfoLine label="Sources" value={sourceDistribution} />
+        <InfoLine label="Portfolio backfill" value={diagnostics?.readyForPortfolioHistory ? 'Ready' : 'Limited'} />
+        <InfoLine label="Historical support" value={provider.supportsHistorical ? 'Yes' : 'No'} />
+        <InfoLine label="Latest support" value={provider.supportsLatest ? 'Yes' : 'No'} />
+        <InfoLine label="Adjusted close" value={provider.supportsAdjustedClose ? 'Yes' : 'No'} />
+        <InfoLine label="API key" value={provider.requiresApiKey ? 'Required' : 'Not required'} />
+      </div>
+      <p className="mt-3 text-xs leading-5 text-slate-500">{provider.notes}</p>
+      {warnings.length > 0 || stooqWarning ? (
+        <div className="mt-3 rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
+          {[...warnings, ...(stooqWarning ? ['Stooq history looks partial; use CSV import fallback if provider backfill misses rows.'] : [])].join(' ')}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function LedgerTable({ entries, onDelete, saving }: { entries: CashLedgerEntry[]; onDelete: (id: string) => void; saving: boolean }) {

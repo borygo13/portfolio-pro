@@ -13,7 +13,10 @@ export type ReturnMetric = {
   reason?: string
   startDate?: string | null
   endDate?: string | null
+  confidence?: ReturnConfidence
 }
+
+export type ReturnConfidence = 'high' | 'limited' | 'low'
 
 export type ExclusionReason =
   | 'cashFlowDominated'
@@ -68,6 +71,30 @@ export type BenchmarkRelativePoint = {
   relativeReturnPct: number
 }
 
+export type LargeCashFlowDiagnostic = {
+  date: string
+  amount: number
+  startValue: number
+  endValue: number
+}
+
+export type ReturnSanityDiagnostics = {
+  confidence: ReturnConfidence
+  confidenceReasons: string[]
+  startPortfolioValue: number | null
+  endPortfolioValue: number | null
+  startContribution: number | null
+  endContribution: number | null
+  startNetCashFlow: number | null
+  endNetCashFlow: number | null
+  nominalGrowthPct: number | null
+  contributionAdjustedGrowthPct: number | null
+  totalExternalFlow: number
+  flowImpactRatio: number | null
+  performanceDriver: 'asset returns' | 'cash flows' | 'mixed' | 'limited'
+  largeCashFlowDates: LargeCashFlowDiagnostic[]
+}
+
 export type TruePortfolioReturns = {
   intervals: ReturnInterval[]
   validIntervals: ReturnInterval[]
@@ -93,6 +120,7 @@ export type TruePortfolioReturns = {
   worstRolling12m: ReturnMetric
   benchmarkRelativeReturn: ReturnMetric
   recoveryFromDrawdownMonths: ReturnMetric
+  sanityDiagnostics: ReturnSanityDiagnostics
   summaryReason: string | null
 }
 
@@ -122,6 +150,7 @@ const MIN_DRAWDOWN_POINTS = 10
 const MAX_INTERVAL_GAP_DAYS = 45
 const MAX_INTERVAL_RETURN = 0.6
 const MAX_TOTAL_RETURN = 10
+const MAX_PLAUSIBLE_RETURN = 5
 const MAX_EXCLUDED_RATIO = 0.85
 const CASH_FLOW_DOMINANCE_MULTIPLE = 20
 const MIN_CASH_FLOW_DOMINANCE_ABS = 25000
@@ -208,9 +237,16 @@ function sortSnapshots(snapshots: PortfolioSnapshot[]) {
   return Array.from(byDate.values()).sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))
 }
 
-function metric(value: number | null, reason?: string, startDate?: string | null, endDate?: string | null): ReturnMetric {
+function metric(value: number | null, reason?: string, startDate?: string | null, endDate?: string | null, confidence?: ReturnConfidence): ReturnMetric {
   const available = value != null && Number.isFinite(value)
-  return { available, value: available ? value : null, reason: available ? undefined : reason ?? 'Limited data.', startDate, endDate }
+  return {
+    available,
+    value: available ? value : null,
+    reason: available ? undefined : reason ?? 'Limited data.',
+    startDate,
+    endDate,
+    confidence: confidence ?? (available ? 'high' : 'low'),
+  }
 }
 
 function excluded(base: Omit<ReturnInterval, 'returnPct' | 'validForTwr'>, reason: ExclusionReason): ReturnInterval {
@@ -411,6 +447,87 @@ function mwrApproxMetric(snapshots: PortfolioSnapshot[], intervals: ReturnInterv
   const value = (endingValue + income - expense - beginValue - totalFlows) / denominator
   if (!Number.isFinite(value) || Math.abs(value) > MAX_MWR_ABS_RETURN) return metric(null, 'MWR estimate suppressed by safety guard.')
   return metric(value, undefined, first.snapshot_date, last.snapshot_date)
+}
+
+function largeCashFlowThreshold(startValue: number) {
+  return Math.max(MIN_CASH_FLOW_DOMINANCE_ABS, Math.max(startValue, MIN_RETURN_BASE) * 0.25)
+}
+
+function buildSanityDiagnostics(snapshots: PortfolioSnapshot[], intervals: ReturnInterval[], validIntervals: ReturnInterval[], benchmarkOverlapPoints: number): ReturnSanityDiagnostics {
+  const first = snapshots[0]
+  const last = snapshots[snapshots.length - 1]
+  const startPortfolioValue = first ? n(first.total_value) : null
+  const endPortfolioValue = last ? n(last.total_value) : null
+  const startContribution = first ? n(first.contribution) : null
+  const endContribution = last ? n(last.contribution) : null
+  const startNetCashFlow = first ? n(first.net_cash_flow) : null
+  const endNetCashFlow = last ? n(last.net_cash_flow) : null
+  const totalExternalFlow = intervals.reduce((sum, interval) => sum + interval.externalFlow, 0)
+  const nominalGrowthPct = startPortfolioValue && startPortfolioValue >= MIN_RETURN_BASE && endPortfolioValue != null
+    ? endPortfolioValue / startPortfolioValue - 1
+    : null
+  const contributionAdjustedGrowthPct = startPortfolioValue && startPortfolioValue >= MIN_RETURN_BASE && endPortfolioValue != null
+    ? (endPortfolioValue - startPortfolioValue - totalExternalFlow) / startPortfolioValue
+    : null
+  const flowImpactRatio = startPortfolioValue && endPortfolioValue != null && Math.max(startPortfolioValue, endPortfolioValue) > 0
+    ? Math.abs(totalExternalFlow) / Math.max(startPortfolioValue, endPortfolioValue)
+    : null
+  const excludedRatio = intervals.length > 0 ? (intervals.length - validIntervals.length) / intervals.length : 1
+  const largeCashFlowDates = intervals
+    .filter((interval) => Math.abs(interval.externalFlow) >= largeCashFlowThreshold(interval.startValue))
+    .sort((a, b) => Math.abs(b.externalFlow) - Math.abs(a.externalFlow))
+    .slice(0, 6)
+    .map((interval) => ({ date: interval.endDate, amount: interval.externalFlow, startValue: interval.startValue, endValue: interval.endValue }))
+
+  const confidenceReasons: string[] = []
+  if (snapshots.length < MIN_VALID_INTERVALS + 1) confidenceReasons.push('needs more snapshots')
+  if (validIntervals.length < MIN_VALID_INTERVALS) confidenceReasons.push('needs more stable intervals')
+  if (excludedRatio > 0.6) confidenceReasons.push('limited by excluded intervals')
+  if (largeCashFlowDates.length > 0) confidenceReasons.push('large cash-flow dates detected')
+  if (benchmarkOverlapPoints > 0 && benchmarkOverlapPoints < MIN_BENCHMARK_OVERLAP_POINTS) confidenceReasons.push('benchmark overlap is short')
+  if (startPortfolioValue != null && startPortfolioValue < MIN_RETURN_BASE) confidenceReasons.push('starting value is too low')
+
+  const confidence: ReturnConfidence = confidenceReasons.some((reason) => reason.includes('needs more') || reason.includes('starting value'))
+    ? 'low'
+    : confidenceReasons.length > 0
+      ? 'limited'
+      : 'high'
+
+  const driver = flowImpactRatio == null || contributionAdjustedGrowthPct == null
+    ? 'limited'
+    : flowImpactRatio > 0.5 && Math.abs(contributionAdjustedGrowthPct) < Math.max(0.05, Math.abs(nominalGrowthPct ?? 0) * 0.35)
+      ? 'cash flows'
+      : flowImpactRatio > 0.25
+        ? 'mixed'
+        : 'asset returns'
+
+  return {
+    confidence,
+    confidenceReasons,
+    startPortfolioValue,
+    endPortfolioValue,
+    startContribution,
+    endContribution,
+    startNetCashFlow,
+    endNetCashFlow,
+    nominalGrowthPct,
+    contributionAdjustedGrowthPct,
+    totalExternalFlow,
+    flowImpactRatio,
+    performanceDriver: driver,
+    largeCashFlowDates,
+  }
+}
+
+function calibrateMetric(result: ReturnMetric, label: string, diagnostics: ReturnSanityDiagnostics) {
+  if (!result.available || result.value == null) return { ...result, confidence: result.confidence ?? 'low' as ReturnConfidence }
+  if (Math.abs(result.value) > MAX_PLAUSIBLE_RETURN) {
+    return metric(null, `${label} suppressed because it is outside plausible snapshot-based bounds.`, result.startDate, result.endDate, 'low')
+  }
+  if (diagnostics.confidence === 'low') {
+    return { ...result, confidence: 'limited' as ReturnConfidence }
+  }
+  return { ...result, confidence: diagnostics.confidence }
 }
 
 function cagrMetric(twr: ReturnMetric) {
@@ -619,6 +736,10 @@ export function buildTruePortfolioReturns(input: EngineInput): TruePortfolioRetu
   const drawdowns = drawdownCurve(curve.points)
   const benchmark = benchmarkRelative(curve.points, input.benchmarkHistory)
   const exclusionReasonCounts = buildExclusionReasonCounts(intervals)
+  const diagnostics = buildSanityDiagnostics(snapshots, intervals, validIntervals, benchmark.overlapPoints)
+  const twrCalibrated = calibrateMetric(twr, 'TWR estimate', diagnostics)
+  const mwrCalibrated = calibrateMetric(mwrApproxMetric(snapshots, intervals), 'MWR approximation', diagnostics)
+  const cagrCalibrated = calibrateMetric(cagrMetric(twrCalibrated), 'CAGR', diagnostics)
 
   return {
     intervals,
@@ -637,14 +758,15 @@ export function buildTruePortfolioReturns(input: EngineInput): TruePortfolioRetu
     exclusionReasonSummary: exclusionSummary(exclusionReasonCounts),
     returnCurveReason: curve.reason,
     drawdownReason: drawdowns.reason,
-    twrReturn: twr,
-    mwrApprox: mwrApproxMetric(snapshots, intervals),
-    cagr: cagrMetric(twr),
+    twrReturn: twrCalibrated,
+    mwrApprox: mwrCalibrated,
+    cagr: cagrCalibrated,
     rolling30dVolatility: rolling30dVolatility(intervals),
     bestRolling12m: rollingBounds.best,
     worstRolling12m: rollingBounds.worst,
     benchmarkRelativeReturn: benchmark.metric,
     recoveryFromDrawdownMonths: recoveryMetric(drawdowns.points, validIntervals),
-    summaryReason: twr.available ? null : twr.reason ?? curve.reason ?? 'True return engine needs more valid history.',
+    sanityDiagnostics: diagnostics,
+    summaryReason: twrCalibrated.available ? null : twrCalibrated.reason ?? curve.reason ?? 'True return engine needs more valid history.',
   }
 }
