@@ -302,8 +302,80 @@ export type MarketPriceHistoryPoint = {
   fetched_at: string
 }
 
+export type MarketPriceSourceDistribution = {
+  source: string
+  count: number
+}
+
+export type MarketPriceDiagnostics = {
+  asset_id: string
+  rowCount: number
+  minPriceDate: string | null
+  maxPriceDate: string | null
+  latestPriceDate: string | null
+  latestFetchedAt: string | null
+  recentCalendarGapDays: number | null
+  missingRecentTradingDays: number
+  recentGapCount: number
+  maxRecentGapDays: number
+  sourceDistribution: MarketPriceSourceDistribution[]
+  sourceSymbol: string | null
+  basePriceRows: number
+  missingBasePriceRows: number
+  readyForPortfolioHistory: boolean
+  quality: 'ready' | 'limited' | 'missing'
+  warnings: string[]
+}
+
 export const CHART_RANGES = ['30D', '90D', '1Y', '3Y', '5Y', 'MAX'] as const
 export type ChartRange = typeof CHART_RANGES[number]
+
+function marketDateKey(value: string | null | undefined) {
+  const text = String(value ?? '').trim()
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (match) return `${match[1]}-${match[2]}-${match[3]}`
+  const parsed = new Date(text)
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10)
+}
+
+function marketDayTime(value: string) {
+  const key = marketDateKey(value)
+  if (!key) return Number.NaN
+  const [year, month, day] = key.split('-').map(Number)
+  return Date.UTC(year, month - 1, day)
+}
+
+function marketDaysBetween(start: string, end: string) {
+  const startTime = marketDayTime(start)
+  const endTime = marketDayTime(end)
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return 0
+  return Math.max(0, Math.floor((endTime - startTime) / (24 * 60 * 60 * 1000)))
+}
+
+function marketAddDays(date: string, days: number) {
+  const key = marketDateKey(date)
+  if (!key) return date
+  const value = new Date(`${key}T00:00:00.000Z`)
+  value.setUTCDate(value.getUTCDate() + days)
+  return value.toISOString().slice(0, 10)
+}
+
+function marketIsWeekday(date: string) {
+  const value = new Date(`${date}T00:00:00.000Z`)
+  const day = value.getUTCDay()
+  return day !== 0 && day !== 6
+}
+
+function marketWeekdaysAfter(startDate: string | null, endDate: string) {
+  if (!startDate) return 0
+  let count = 0
+  let cursor = marketAddDays(startDate, 1)
+  while (cursor <= endDate) {
+    if (marketIsWeekday(cursor)) count += 1
+    cursor = marketAddDays(cursor, 1)
+  }
+  return count
+}
 
 function chartRangeStartDate(range: ChartRange) {
   if (range === 'MAX') return null
@@ -337,6 +409,96 @@ export async function listMarketPriceHistory(portfolioId: string, assetId: strin
 
   if (error) throw new Error(`Nie udało się pobrać historii cen aktywa: ${error.message}`)
   return ((data ?? []) as MarketPriceHistoryPoint[]).slice().reverse()
+}
+
+export async function getMarketPriceDiagnostics(portfolioId: string, assetId: string): Promise<MarketPriceDiagnostics> {
+  const { data, error } = await supabase
+    .from('market_prices')
+    .select('asset_id,source,source_symbol,price_date,close_price,close_price_base,source_currency,base_currency,fetched_at')
+    .eq('portfolio_id', portfolioId)
+    .eq('asset_id', assetId)
+    .order('price_date', { ascending: true })
+    .limit(10000)
+
+  if (error) throw new Error(`Nie udało się pobrać diagnostyki cen: ${error.message}`)
+
+  const rows = (data ?? []) as {
+    asset_id: string
+    source: string | null
+    source_symbol: string | null
+    price_date: string
+    close_price: number | null
+    close_price_base: number | null
+    source_currency: string | null
+    base_currency: string | null
+    fetched_at: string | null
+  }[]
+  const dates = rows.map((row) => marketDateKey(row.price_date)).filter(Boolean)
+  const minPriceDate = dates[0] ?? null
+  const maxPriceDate = dates[dates.length - 1] ?? null
+  const latestFetchedAt = rows[rows.length - 1]?.fetched_at ?? null
+  const today = new Date().toISOString().slice(0, 10)
+  const recentCalendarGapDays = maxPriceDate ? marketDaysBetween(maxPriceDate, today) : null
+  const missingRecentTradingDays = marketWeekdaysAfter(maxPriceDate, today)
+  const recentStart = marketAddDays(today, -90)
+  let recentGapCount = 0
+  let maxRecentGapDays = 0
+  for (let index = 1; index < dates.length; index += 1) {
+    const current = dates[index]
+    if (current < recentStart) continue
+    const gap = marketDaysBetween(dates[index - 1], current)
+    if (gap > 4) recentGapCount += 1
+    maxRecentGapDays = Math.max(maxRecentGapDays, gap)
+  }
+
+  const sourceCounts = new Map<string, number>()
+  const sourceSymbolCounts = new Map<string, number>()
+  let basePriceRows = 0
+  let missingBasePriceRows = 0
+  for (const row of rows) {
+    const source = row.source || 'unknown'
+    sourceCounts.set(source, (sourceCounts.get(source) ?? 0) + 1)
+    if (row.source_symbol) sourceSymbolCounts.set(row.source_symbol, (sourceSymbolCounts.get(row.source_symbol) ?? 0) + 1)
+    if (Number(row.close_price_base ?? 0) > 0) basePriceRows += 1
+    else missingBasePriceRows += 1
+  }
+
+  const sourceDistribution = Array.from(sourceCounts.entries())
+    .map(([source, count]) => ({ source, count }))
+    .sort((a, b) => b.count - a.count)
+  const sourceSymbol = Array.from(sourceSymbolCounts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
+  const warnings: string[] = []
+  if (rows.length === 0) warnings.push('No historical market_prices rows for this asset.')
+  if (recentCalendarGapDays != null && recentCalendarGapDays > 7) warnings.push(`Latest price is ${recentCalendarGapDays} calendar days old.`)
+  if (missingRecentTradingDays > 3) warnings.push(`${missingRecentTradingDays} recent weekdays have no market price rows.`)
+  if (recentGapCount > 0) warnings.push(`${recentGapCount} recent history gap(s) exceed 4 calendar days.`)
+  if (rows.length > 0 && missingBasePriceRows / rows.length > 0.5) warnings.push('Most rows do not have close_price_base; portfolio valuation needs FX coverage.')
+
+  const quality: MarketPriceDiagnostics['quality'] = rows.length === 0
+    ? 'missing'
+    : warnings.length > 0
+      ? 'limited'
+      : 'ready'
+
+  return {
+    asset_id: assetId,
+    rowCount: rows.length,
+    minPriceDate,
+    maxPriceDate,
+    latestPriceDate: maxPriceDate,
+    latestFetchedAt,
+    recentCalendarGapDays,
+    missingRecentTradingDays,
+    recentGapCount,
+    maxRecentGapDays,
+    sourceDistribution,
+    sourceSymbol,
+    basePriceRows,
+    missingBasePriceRows,
+    readyForPortfolioHistory: rows.length >= 2 && quality !== 'missing',
+    quality,
+    warnings,
+  }
 }
 
 export type CashLedgerEntryType = 'deposit' | 'withdrawal' | 'fee' | 'tax' | 'adjustment'
