@@ -33,6 +33,58 @@ export type CreateAssetInput = {
   target_allocation: number
 }
 
+export type InstrumentCatalogRow = {
+  id: string
+  name: string
+  symbol: string
+  market_symbol: string
+  provider: string
+  category: string
+  asset_type: string
+  currency: string
+  exchange: string | null
+  country: string | null
+  aliases: string[] | null
+  benchmark_candidate: boolean
+  is_active: boolean
+  created_at: string
+  updated_at: string | null
+}
+
+const INSTRUMENT_CATALOG_SELECT = 'id,name,symbol,market_symbol,provider,category,asset_type,currency,exchange,country,aliases,benchmark_candidate,is_active,created_at,updated_at'
+
+function normalizeCatalogSearch(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+function catalogSearchText(item: InstrumentCatalogRow) {
+  return normalizeCatalogSearch([
+    item.name,
+    item.symbol,
+    item.market_symbol,
+    item.provider,
+    item.category,
+    item.asset_type,
+    item.currency,
+    item.exchange ?? '',
+    item.country ?? '',
+    ...(item.aliases ?? []),
+  ].join(' '))
+}
+
+function filterCatalogRows(rows: InstrumentCatalogRow[], query: string) {
+  const terms = normalizeCatalogSearch(query).split(/\s+/).filter(Boolean)
+  if (terms.length === 0) return rows
+  return rows.filter((row) => {
+    const haystack = catalogSearchText(row)
+    return terms.every((term) => haystack.includes(term))
+  })
+}
+
 export async function getDefaultPortfolio(user: User): Promise<Portfolio> {
   await ensureUserWorkspace(user)
 
@@ -534,7 +586,7 @@ export async function deleteEdoBond(id: string) {
   if (error) throw new Error(`Nie udało się usunąć obligacji EDO: ${error.message}`)
 }
 
-export type UpdateAssetInput = Partial<CreateAssetInput> & { market_symbol?: string | null }
+export type UpdateAssetInput = Partial<CreateAssetInput> & { market_symbol?: string | null; price_source?: string | null }
 
 export async function updateAsset(assetId: string, input: UpdateAssetInput): Promise<Asset> {
   const payload: Record<string, any> = {}
@@ -544,6 +596,7 @@ export async function updateAsset(assetId: string, input: UpdateAssetInput): Pro
   if (input.currency !== undefined) payload.currency = input.currency.trim().toUpperCase()
   if (input.target_allocation !== undefined) payload.target_allocation = input.target_allocation || 0
   if (input.market_symbol !== undefined) payload.market_symbol = input.market_symbol?.trim() || null
+  if (input.price_source !== undefined) payload.price_source = input.price_source?.trim() || 'auto'
 
   const { data, error } = await supabase
     .from('assets')
@@ -556,6 +609,71 @@ export async function updateAsset(assetId: string, input: UpdateAssetInput): Pro
   return data as Asset
 }
 
+export async function listInstrumentCatalog(limit = 300): Promise<InstrumentCatalogRow[]> {
+  const { data, error } = await supabase
+    .from('instrument_catalog')
+    .select(INSTRUMENT_CATALOG_SELECT)
+    .eq('is_active', true)
+    .order('benchmark_candidate', { ascending: false })
+    .order('symbol', { ascending: true })
+    .limit(limit)
+
+  if (error) throw new Error(`Nie udało się pobrać katalogu instrumentów: ${error.message}`)
+  return (data ?? []) as InstrumentCatalogRow[]
+}
+
+export async function searchInstrumentCatalog(query: string, category?: string): Promise<InstrumentCatalogRow[]> {
+  let request = supabase
+    .from('instrument_catalog')
+    .select(INSTRUMENT_CATALOG_SELECT)
+    .eq('is_active', true)
+    .order('benchmark_candidate', { ascending: false })
+    .order('symbol', { ascending: true })
+    .limit(300)
+
+  if (category) request = request.eq('category', category)
+
+  const { data, error } = await request
+  if (error) throw new Error(`Nie udało się wyszukać instrumentów: ${error.message}`)
+
+  return filterCatalogRows((data ?? []) as InstrumentCatalogRow[], query).slice(0, 50)
+}
+
+export async function listBenchmarkCandidates(): Promise<InstrumentCatalogRow[]> {
+  const { data, error } = await supabase
+    .from('instrument_catalog')
+    .select(INSTRUMENT_CATALOG_SELECT)
+    .eq('is_active', true)
+    .eq('benchmark_candidate', true)
+    .order('category', { ascending: true })
+    .order('symbol', { ascending: true })
+    .limit(120)
+
+  if (error) throw new Error(`Nie udało się pobrać kandydatów benchmarku: ${error.message}`)
+  return (data ?? []) as InstrumentCatalogRow[]
+}
+
 export async function updateAssetMarketSymbol(assetId: string, marketSymbol: string | null): Promise<Asset> {
   return updateAsset(assetId, { market_symbol: marketSymbol })
+}
+
+export async function applyInstrumentPresetToAsset(assetId: string, presetId: string): Promise<Asset> {
+  const { data, error } = await supabase
+    .from('instrument_catalog')
+    .select(INSTRUMENT_CATALOG_SELECT)
+    .eq('id', presetId)
+    .eq('is_active', true)
+    .single()
+
+  if (error) throw new Error(`Nie udało się pobrać presetu instrumentu: ${error.message}`)
+  const preset = data as InstrumentCatalogRow
+
+  return updateAsset(assetId, {
+    symbol: preset.symbol,
+    name: preset.name,
+    asset_type: preset.asset_type as AssetType,
+    currency: preset.currency,
+    market_symbol: preset.market_symbol,
+    price_source: preset.provider,
+  })
 }
