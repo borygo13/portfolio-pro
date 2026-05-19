@@ -110,13 +110,14 @@ function headerMap(headers: string[]): HeaderMap {
   const map = { ...missingHeader }
   headers.forEach((header, index) => {
     const key = normalizeHeader(header)
-    if (['date', 'data', 'datetime', 'time'].includes(key)) map.date = index
-    if (['open', 'otwarcie'].includes(key)) map.open = index
-    if (['high', 'najwyzszy', 'max'].includes(key)) map.high = index
-    if (['low', 'najnizszy', 'min'].includes(key)) map.low = index
-    if (['close', 'zamkniecie', 'price', 'cena', 'last'].includes(key)) map.close = index
-    if (['adjustedclose', 'adjclose', 'adjusted', 'adj'].includes(key)) map.adjustedClose = index
+    if (['date', 'data', 'datetime', 'time', 'timestamp', 'tradingdate', 'pricedate'].includes(key)) map.date = index
+    if (['open', 'otwarcie', 'openingprice', 'openprice'].includes(key)) map.open = index
+    if (['high', 'najwyzszy', 'max', 'highest', 'highprice', 'maxprice'].includes(key)) map.high = index
+    if (['low', 'najnizszy', 'min', 'lowest', 'lowprice', 'minprice'].includes(key)) map.low = index
+    if (['close', 'zamkniecie', 'price', 'cena', 'last', 'closeprice', 'lastprice', 'closingprice', 'kurszamkniecia'].includes(key)) map.close = index
+    if (['adjustedclose', 'adjclose', 'adjusted', 'adj', 'adjustedcloseprice', 'adjcloseprice', 'adjustedclosingprice'].includes(key)) map.adjustedClose = index
   })
+  if (map.close < 0 && map.adjustedClose >= 0) map.close = map.adjustedClose
   return map
 }
 
@@ -131,7 +132,7 @@ function toDateString(year: number, month: number, day: number) {
 
 export function parseCsvDate(value: string) {
   const raw = value.trim()
-  let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  let match = raw.match(/^(\d{4})[-/.](\d{2})[-/.](\d{2})/)
   if (match) {
     const year = Number(match[1])
     const month = Number(match[2])

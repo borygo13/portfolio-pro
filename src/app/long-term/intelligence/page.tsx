@@ -98,6 +98,9 @@ type BackfillResult = {
     fxMissingRows: number
     latestPriceDate: string | null
     error: string | null
+    providerFallbackChain?: string[]
+    providerMessages?: string[]
+    adjustedPriceRows?: number
   }[]
   error?: string
 }
@@ -1056,7 +1059,7 @@ export default function PortfolioIntelligencePage() {
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-white">Provider symbol</p>
-                      <p className="mt-1 text-xs text-slate-500">Używany do Stooq/CoinGecko. Symbol użytkownika pozostaje bez zmian.</p>
+                      <p className="mt-1 text-xs text-slate-500">Używany do EODHD/Stooq/CoinGecko. Symbol użytkownika pozostaje bez zmian.</p>
                     </div>
                     <span className="rounded-full bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-200">{selectedBackfillSymbol}</span>
                   </div>
@@ -1109,7 +1112,7 @@ export default function PortfolioIntelligencePage() {
               </SubmitButton>
             </form>
 
-            <p className="mt-4 text-xs leading-5 text-slate-500">Przykłady provider symbol: iusq.de, aapl.us, msft.us, BTC jako CoinGecko bitcoin. Przy błędnym symbolu API zwróci status per aktywo.</p>
+            <p className="mt-4 text-xs leading-5 text-slate-500">Przykłady provider symbol: IUSQ.DE, 500.PA, CSPX.L, AAPL.US, BTC jako CoinGecko bitcoin. Przy błędnym symbolu API zwróci status per aktywo.</p>
             </Card>
 
             <Card>
@@ -1281,7 +1284,7 @@ function MarketDataQualityPanel({ asset, provider, diagnostics, loading, error }
     ? diagnostics.sourceDistribution.map((item) => `${item.source} ${item.count}`).join(' · ')
     : '—'
   const warnings = diagnostics?.warnings.length ? diagnostics.warnings : []
-  const stooqWarning = provider.provider.includes('stooq') && diagnostics?.quality !== 'ready'
+  const stooqWarning = provider.fallbackOrder.includes('stooq') && diagnostics?.quality !== 'ready'
 
   return (
     <div className="mt-4 border-t border-white/10 pt-4">
@@ -1300,6 +1303,7 @@ function MarketDataQualityPanel({ asset, provider, diagnostics, loading, error }
         <InfoLine label="Stored source symbol" value={diagnostics?.sourceSymbol ?? '—'} />
         <InfoLine label="Rows" value={diagnostics ? String(diagnostics.rowCount) : '—'} />
         <InfoLine label="Date range" value={diagnostics?.minPriceDate && diagnostics.maxPriceDate ? `${formatDate(diagnostics.minPriceDate)} → ${formatDate(diagnostics.maxPriceDate)}` : '—'} />
+        <InfoLine label="Coverage" value={diagnostics?.historyCoveragePct == null ? '—' : `${PCT.format(diagnostics.historyCoveragePct)} · ${diagnostics.expectedTradingDays} weekdays`} />
         <InfoLine label="Latest price" value={diagnostics?.latestPriceDate ? formatDate(diagnostics.latestPriceDate) : '—'} />
         <InfoLine label="Recent gap" value={diagnostics?.recentCalendarGapDays == null ? '—' : `${diagnostics.recentCalendarGapDays} calendar days · ${diagnostics.missingRecentTradingDays} weekdays`} />
         <InfoLine label="Recent history gaps" value={diagnostics ? `${diagnostics.recentGapCount} · max ${diagnostics.maxRecentGapDays} days` : '—'} />
@@ -1310,6 +1314,9 @@ function MarketDataQualityPanel({ asset, provider, diagnostics, loading, error }
         <InfoLine label="Latest support" value={provider.supportsLatest ? 'Yes' : 'No'} />
         <InfoLine label="Adjusted close" value={provider.supportsAdjustedClose ? 'Yes' : 'No'} />
         <InfoLine label="API key" value={provider.requiresApiKey ? 'Required' : 'Not required'} />
+        <InfoLine label="Range support" value={provider.historicalRangeSupport} />
+        <InfoLine label="Asset types" value={provider.supportedAssetTypes.join(', ') || '—'} />
+        <InfoLine label="Rate limits" value={provider.rateLimitDiagnostics} />
       </div>
       <p className="mt-3 text-xs leading-5 text-slate-500">{provider.notes}</p>
       {warnings.length > 0 || stooqWarning ? (
@@ -1458,15 +1465,18 @@ function BackfillResultPanel({ result, loading }: { result: BackfillResult | nul
               <div>
                 <p className="font-semibold text-white">{item.symbol} · {item.sourceSymbol}</p>
                 <p className="mt-1 text-xs text-slate-500">{item.provider} · latest {item.latestPriceDate ?? '—'}</p>
+                {item.providerFallbackChain?.length ? <p className="mt-1 text-xs text-slate-500">Fallback: {item.providerFallbackChain.join(' -> ')}</p> : null}
               </div>
               <span className={`rounded-full px-3 py-1 text-xs font-semibold ${item.status === 'failed' ? 'bg-rose-500/10 text-rose-200' : item.status === 'partial' ? 'bg-amber-500/10 text-amber-100' : 'bg-emerald-500/10 text-emerald-200'}`}>{item.status}</span>
             </div>
-            <div className="mt-4 grid gap-3 text-sm md:grid-cols-4">
+            <div className="mt-4 grid gap-3 text-sm md:grid-cols-5">
               <InfoLine label="Fetched" value={String(item.fetchedRows)} />
               <InfoLine label="Saved" value={String(item.persistedRows)} />
               <InfoLine label="Older rows" value={String(item.remainingRows)} />
               <InfoLine label="FX missing" value={String(item.fxMissingRows)} />
+              <InfoLine label="Adjusted rows" value={String(item.adjustedPriceRows ?? 0)} />
             </div>
+            {item.providerMessages?.length ? <p className="mt-3 text-sm text-slate-400">{item.providerMessages.join(' ')}</p> : null}
             {item.error ? <p className="mt-3 text-sm text-amber-100">{item.error}</p> : null}
           </div>
         ))}
