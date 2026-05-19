@@ -24,22 +24,14 @@ create table if not exists instrument_catalog (
 
 create unique index if not exists instrument_catalog_provider_market_symbol_key
   on instrument_catalog(provider, market_symbol);
+drop index if exists instrument_catalog_aliases_idx;
+drop index if exists instrument_catalog_text_search_idx;
 create index if not exists instrument_catalog_symbol_idx on instrument_catalog(symbol);
 create index if not exists instrument_catalog_market_symbol_idx on instrument_catalog(market_symbol);
 create index if not exists instrument_catalog_provider_idx on instrument_catalog(provider);
 create index if not exists instrument_catalog_category_idx on instrument_catalog(category);
 create index if not exists instrument_catalog_benchmark_candidate_idx on instrument_catalog(benchmark_candidate) where benchmark_candidate = true;
-create index if not exists instrument_catalog_aliases_idx on instrument_catalog using gin(aliases);
-create index if not exists instrument_catalog_text_search_idx on instrument_catalog using gin (
-  to_tsvector(
-    'simple',
-    coalesce(name, '') || ' ' ||
-    coalesce(symbol, '') || ' ' ||
-    coalesce(market_symbol, '') || ' ' ||
-    coalesce(category, '') || ' ' ||
-    coalesce(array_to_string(aliases, ' '), '')
-  )
-);
+create index if not exists instrument_catalog_is_active_idx on instrument_catalog(is_active);
 
 alter table instrument_catalog enable row level security;
 

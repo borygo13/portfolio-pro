@@ -402,6 +402,8 @@ Model pól:
 
 RLS pozwala zalogowanym użytkownikom czytać tylko aktywne wpisy katalogu. Klient nie ma grantów do insert/update/delete katalogu.
 
+Migracja celowo używa tylko prostych indeksów btree. Full-text/expression index jest pominięty na tym etapie, bo starter catalog ma około 180 wierszy i UI filtruje wyniki po stronie klienta.
+
 UI:
 
 ```text
