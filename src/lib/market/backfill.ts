@@ -1,7 +1,7 @@
 import { resolveCoinGeckoId } from '@/lib/market/providers/coingecko'
 import { getNbpHistoricalRatesToPln } from '@/lib/market/providers/nbp'
-import { normalizeStooqSymbol } from '@/lib/market/providers/stooq'
 import { PROVIDER_CAPABILITIES, providerFallbackOrderForAsset, type MarketProviderId } from '@/lib/market/provider-diagnostics'
+import { getProviderSymbolCandidates, resolveProviderSymbol, type ProviderSymbolCandidate } from '@/lib/market/provider-symbols'
 import { getServerSupabase, type ServerSupabase } from '@/lib/market/persistence'
 import type { AssetForPricing, FxRateResult } from '@/lib/market/types'
 
@@ -47,6 +47,13 @@ type HistoricalFetchResult = {
   rows: RawHistoricalPricePoint[]
   providerFallbackChain: MarketProviderId[]
   providerMessages: string[]
+  providerCandidateSymbols: string[]
+}
+
+type ProviderHistoryResult = {
+  rows: RawHistoricalPricePoint[]
+  candidateSymbols: string[]
+  messages: string[]
 }
 
 export type BackfillAssetReport = {
@@ -65,6 +72,7 @@ export type BackfillAssetReport = {
   error: string | null
   providerFallbackChain: MarketProviderId[]
   providerMessages: string[]
+  providerCandidateSymbols: string[]
   adjustedPriceRows: number
 }
 
@@ -128,7 +136,7 @@ function eodhdSource(symbol: string, currency: string) {
 }
 
 function providerSymbolError() {
-  return 'Sprawdź market_symbol. Przykłady: IUSQ.DE, 500.PA, CSPX.L, AAPL.US, BTC via CoinGecko bitcoin.'
+  return 'Sprawdź market_symbol/provider symbol. Przykłady: IUSQ.DE -> EODHD IUSQ.XETRA / Stooq iusq.de, 500.PA -> Stooq 500.fr, CSPX.L -> EODHD CSPX.LSE, BTC via CoinGecko bitcoin.'
 }
 
 function responsePreview(text: string) {
@@ -146,24 +154,6 @@ function cryptoCompareSymbol(asset: AssetForPricing) {
   const ticker = asset.symbol.trim().toUpperCase()
   if (ticker === 'XBT') return 'BTC'
   return ticker
-}
-
-function normalizeEodhdSymbol(value: string) {
-  return value.trim().replace(/^etr:/i, '').replace(/^xetra:/i, '').replace(/^nasdaq:/i, '').replace(/^nyse:/i, '').toUpperCase()
-}
-
-function eodhdSymbolCandidates(asset: AssetForPricing) {
-  const configured = normalizeEodhdSymbol(asset.market_symbol || asset.symbol)
-  const candidates = [configured]
-  if (configured.endsWith('.DE')) candidates.push(configured.replace(/\.DE$/, '.XETRA'), configured.replace(/\.DE$/, '.F'))
-  if (configured.endsWith('.L')) candidates.push(configured.replace(/\.L$/, '.LSE'))
-  if (!configured.includes('.')) {
-    const currency = (asset.currency ?? '').toUpperCase()
-    if (currency === 'USD') candidates.push(`${configured}.US`)
-    if (currency === 'EUR') candidates.push(`${configured}.XETRA`, `${configured}.PA`)
-    if (currency === 'GBP') candidates.push(`${configured}.LSE`)
-  }
-  return Array.from(new Set(candidates.filter(Boolean)))
 }
 
 function mapCryptoPoint(
@@ -406,21 +396,33 @@ async function fetchEodhdHistoryForSymbol(asset: AssetForPricing, symbol: string
   return rows
 }
 
-async function fetchEodhdHistory(asset: AssetForPricing, range: BackfillRange): Promise<RawHistoricalPricePoint[]> {
+function candidateList(candidates: ProviderSymbolCandidate[]) {
+  return candidates.map((candidate) => candidate.symbol)
+}
+
+async function fetchEodhdHistory(asset: AssetForPricing, range: BackfillRange): Promise<ProviderHistoryResult> {
+  const candidates = getProviderSymbolCandidates(asset, 'eodhd')
   const errors: string[] = []
-  for (const candidate of eodhdSymbolCandidates(asset)) {
+  for (const candidate of candidates) {
     try {
-      return await fetchEodhdHistoryForSymbol(asset, candidate, range)
+      const rows = await fetchEodhdHistoryForSymbol(asset, candidate.symbol, range)
+      return {
+        rows,
+        candidateSymbols: candidateList(candidates),
+        messages: [
+          ...errors.map((error) => `EODHD candidate failed: ${error}`),
+          `EODHD selected ${candidate.symbol}${candidate.inferred ? ' (inferred mapping)' : ''}.`,
+        ],
+      }
     } catch (err: any) {
-      errors.push(`${candidate}: ${err?.message ?? 'failed'}`)
+      errors.push(`${candidate.symbol}: ${err?.message ?? 'failed'}`)
     }
   }
 
-  throw new Error(errors.join(' | ') || `EODHD failed for ${asset.symbol}. ${providerSymbolError()}`)
+  throw new Error(`EODHD candidates failed (${candidateList(candidates).join(', ') || 'none'}). ${errors.join(' | ') || providerSymbolError()}`)
 }
 
-async function fetchStooqHistory(asset: AssetForPricing, range: BackfillRange): Promise<RawHistoricalPricePoint[]> {
-  const symbol = normalizeStooqSymbol(asset)
+async function fetchStooqHistoryForSymbol(asset: AssetForPricing, symbol: string, range: BackfillRange): Promise<RawHistoricalPricePoint[]> {
   const sourceCurrency = (asset.currency ?? 'PLN').toUpperCase()
   const { startDate, endDate } = rangeWindow(range)
   const url = new URL('https://stooq.com/q/d/l/')
@@ -490,6 +492,28 @@ async function fetchStooqHistory(asset: AssetForPricing, range: BackfillRange): 
   return rows
 }
 
+async function fetchStooqHistory(asset: AssetForPricing, range: BackfillRange): Promise<ProviderHistoryResult> {
+  const candidates = getProviderSymbolCandidates(asset, 'stooq')
+  const errors: string[] = []
+  for (const candidate of candidates) {
+    try {
+      const rows = await fetchStooqHistoryForSymbol(asset, candidate.symbol, range)
+      return {
+        rows,
+        candidateSymbols: candidateList(candidates),
+        messages: [
+          ...errors.map((error) => `Stooq candidate failed: ${error}`),
+          `Stooq selected ${candidate.symbol}${candidate.inferred ? ' (inferred mapping)' : ''}.`,
+        ],
+      }
+    } catch (err: any) {
+      errors.push(`${candidate.symbol}: ${err?.message ?? 'failed'}`)
+    }
+  }
+
+  throw new Error(`Stooq candidates failed (${candidateList(candidates).join(', ') || 'none'}). ${errors.join(' | ') || providerSymbolError()}`)
+}
+
 async function fetchEquityHistory(asset: AssetForPricing, range: BackfillRange): Promise<HistoricalFetchResult> {
   const fallbackChain = providerFallbackOrderForAsset(asset)
   const chain = fallbackChain.filter((provider): provider is HistoricalSource => provider === 'eodhd' || provider === 'stooq')
@@ -500,9 +524,14 @@ async function fetchEquityHistory(asset: AssetForPricing, range: BackfillRange):
 
   for (const provider of chain) {
     try {
-      const rows = provider === 'eodhd' ? await fetchEodhdHistory(asset, range) : await fetchStooqHistory(asset, range)
+      const result = provider === 'eodhd' ? await fetchEodhdHistory(asset, range) : await fetchStooqHistory(asset, range)
       if (providerMessages.length > 0) providerMessages.push(`Using ${PROVIDER_CAPABILITIES[provider].label} after fallback.`)
-      return { rows, providerFallbackChain: fallbackChain, providerMessages }
+      return {
+        rows: result.rows,
+        providerFallbackChain: fallbackChain,
+        providerMessages: [...providerMessages, ...result.messages],
+        providerCandidateSymbols: result.candidateSymbols,
+      }
     } catch (err: any) {
       providerMessages.push(`${PROVIDER_CAPABILITIES[provider].label}: ${err?.message ?? 'failed'}`)
     }
@@ -518,6 +547,10 @@ async function fetchHistoricalRows(asset: AssetForPricing, range: BackfillRange,
       rows: await fetchCryptoHistory(asset, range, maxRows),
       providerFallbackChain: providerFallbackOrderForAsset(asset),
       providerMessages: [],
+      providerCandidateSymbols: [
+        resolveProviderSymbol(asset, 'coingecko'),
+        resolveProviderSymbol(asset, 'cryptocompare'),
+      ],
     }
   }
 
@@ -704,7 +737,7 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
     const latestPriceDate = withFx[withFx.length - 1]?.priceDate ?? null
     const fxMissingRows = withFx.filter((row) => row.sourceCurrency !== row.baseCurrency && row.closePriceBase == null).length
     const provider = withFx[0]?.provider ?? (isCrypto(asset) ? 'coingecko' : 'stooq')
-    const sourceSymbol = withFx[0]?.sourceSymbol ?? (isCrypto(asset) ? resolveCoinGeckoId(asset) : normalizeStooqSymbol(asset))
+    const sourceSymbol = withFx[0]?.sourceSymbol ?? resolveProviderSymbol(asset, provider)
     const adjustedPriceRows = withFx.filter((row) => row.adjustedClosePrice !== row.closePrice).length
     const status: BackfillAssetStatus = remainingRows > 0 ? 'partial' : persistedRows > 0 ? 'success' : 'skipped'
     const error = remainingRows > 0
@@ -726,16 +759,13 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
       error,
       providerFallbackChain: fetched.providerFallbackChain,
       providerMessages: fetched.providerMessages,
+      providerCandidateSymbols: fetched.providerCandidateSymbols,
       adjustedPriceRows,
     }
   } catch (err: any) {
     const fallbackChain = providerFallbackOrderForAsset(asset)
     const provider = fallbackChain[0] ?? (isCrypto(asset) ? 'coingecko' : 'eodhd')
-    const sourceSymbol = provider === 'coingecko'
-      ? resolveCoinGeckoId(asset)
-      : provider === 'eodhd'
-        ? normalizeEodhdSymbol(asset.market_symbol || asset.symbol)
-        : normalizeStooqSymbol(asset)
+    const sourceSymbol = resolveProviderSymbol(asset, provider)
     const error = err?.message ?? 'Nie udało się wykonać backfillu.'
     await updateAssetBackfillStatus(supabase, asset.id, error).catch(() => undefined)
 
@@ -752,6 +782,7 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
       error,
       providerFallbackChain: fallbackChain,
       providerMessages: [error],
+      providerCandidateSymbols: fallbackChain.flatMap((candidateProvider) => getProviderSymbolCandidates(asset, candidateProvider).map((candidate) => candidate.symbol)),
       adjustedPriceRows: 0,
     }
   }

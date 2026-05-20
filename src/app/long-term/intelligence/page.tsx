@@ -36,6 +36,7 @@ import {
   type CsvImportSourceLabel,
 } from '@/lib/market/csv-import'
 import { providerStatusForAsset, type ProviderStatus } from '@/lib/market/provider-diagnostics'
+import { describeSymbolResolution, type SymbolResolutionDescription } from '@/lib/market/provider-symbols'
 import { supabase } from '@/lib/supabase/client'
 import {
   applyInstrumentPresetToAsset,
@@ -100,6 +101,7 @@ type BackfillResult = {
     error: string | null
     providerFallbackChain?: string[]
     providerMessages?: string[]
+    providerCandidateSymbols?: string[]
     adjustedPriceRows?: number
   }[]
   error?: string
@@ -144,18 +146,6 @@ const tabs: { id: TabId; label: string }[] = [
 ]
 
 const backfillRanges: BackfillRange[] = ['1Y', '3Y', '5Y', 'MAX']
-const cryptoIds: Record<string, string> = {
-  BTC: 'bitcoin',
-  XBT: 'bitcoin',
-  ETH: 'ethereum',
-  XRP: 'ripple',
-  SOL: 'solana',
-  ADA: 'cardano',
-  DOT: 'polkadot',
-  BNB: 'binancecoin',
-  DOGE: 'dogecoin',
-}
-
 const cashTypes: { value: CashLedgerEntryType; label: string }[] = [
   { value: 'deposit', label: 'Wpłata' },
   { value: 'withdrawal', label: 'Wypłata' },
@@ -222,29 +212,6 @@ function directionLabel(value: string) {
   if (value === 'buy') return 'Dokup'
   if (value === 'trim') return 'Redukuj'
   return 'Trzymaj'
-}
-
-function cleanProviderSymbol(symbol: string) {
-  return symbol.trim().toLowerCase().replace(/^etr:/i, '').replace(/^xetra:/i, '').replace(/^nasdaq:/i, '').replace(/^nyse:/i, '')
-}
-
-function providerSymbolHint(asset: Asset | null, draft: string) {
-  if (!asset) return '—'
-  const configured = cleanProviderSymbol(draft || asset.market_symbol || '')
-  if (configured) return configured
-
-  const ticker = asset.symbol.trim().toUpperCase()
-  const type = (asset.asset_type ?? '').toLowerCase()
-  if (type.includes('crypto') || cryptoIds[ticker]) return cryptoIds[ticker] ?? ticker.toLowerCase()
-
-  const raw = cleanProviderSymbol(asset.symbol)
-  if (raw.includes('.')) return raw
-
-  const currency = (asset.currency ?? '').toUpperCase()
-  if (currency === 'EUR') return `${raw}.de`
-  if (currency === 'USD') return `${raw}.us`
-  if (currency === 'PLN') return `${raw}.pl`
-  return raw
 }
 
 function normalizeCatalogQuery(value: string) {
@@ -512,8 +479,11 @@ export default function PortfolioIntelligencePage() {
   const allocationDrift = useMemo(() => buildAllocationDrift(positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue), [positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue])
   const selectedBenchmark = assets.find((asset) => asset.id === benchmarkAssetId) ?? null
   const selectedBackfillAsset = marketAssets.find((asset) => asset.id === backfillAssetId) ?? null
-  const selectedBackfillSymbol = providerSymbolHint(selectedBackfillAsset, selectedBackfillAsset ? marketSymbolDrafts[selectedBackfillAsset.id] ?? '' : '')
   const selectedProviderStatus = useMemo(() => providerStatusForAsset(selectedBackfillAsset), [selectedBackfillAsset])
+  const selectedSymbolResolution = useMemo(() => describeSymbolResolution(selectedBackfillAsset
+    ? { ...selectedBackfillAsset, market_symbol: marketSymbolDrafts[selectedBackfillAsset.id] || selectedBackfillAsset.market_symbol }
+    : null, selectedProviderStatus.fallbackOrder), [selectedBackfillAsset, selectedProviderStatus, marketSymbolDrafts])
+  const selectedBackfillSymbol = selectedSymbolResolution?.primarySymbol ?? '—'
   const backfillCatalogResults = useMemo(() => filterCatalogPresets(instrumentCatalog, catalogQuery), [instrumentCatalog, catalogQuery])
   const benchmarkCatalogResults = useMemo(() => filterCatalogPresets(benchmarkCatalog, benchmarkCatalogQuery), [benchmarkCatalog, benchmarkCatalogQuery])
   const selectedCsvImportAsset = marketAssets.find((asset) => asset.id === csvImportAssetId) ?? null
@@ -1065,7 +1035,7 @@ export default function PortfolioIntelligencePage() {
                   </div>
                   <div className="flex flex-col gap-3 md:flex-row">
                     <Input
-                      placeholder="np. iusq.de, aapl.us, bitcoin"
+                      placeholder="np. IUSQ.DE, AAPL.US, bitcoin"
                       value={marketSymbolDrafts[selectedBackfillAsset.id] ?? ''}
                       onChange={(value) => setMarketSymbolDrafts((current) => ({ ...current, [selectedBackfillAsset.id]: value }))}
                     />
@@ -1099,6 +1069,7 @@ export default function PortfolioIntelligencePage() {
                   <MarketDataQualityPanel
                     asset={selectedBackfillAsset}
                     provider={selectedProviderStatus}
+                    resolution={selectedSymbolResolution}
                     diagnostics={marketDiagnostics}
                     loading={marketDiagnosticsLoading}
                     error={marketDiagnosticsError}
@@ -1112,7 +1083,7 @@ export default function PortfolioIntelligencePage() {
               </SubmitButton>
             </form>
 
-            <p className="mt-4 text-xs leading-5 text-slate-500">Przykłady provider symbol: IUSQ.DE, 500.PA, CSPX.L, AAPL.US, BTC jako CoinGecko bitcoin. Przy błędnym symbolu API zwróci status per aktywo.</p>
+            <p className="mt-4 text-xs leading-5 text-slate-500">Przykłady: IUSQ.DE zostanie przetłumaczone na EODHD IUSQ.XETRA i Stooq iusq.de; 500.PA może próbować 500.fr w Stooq; BTC zostaje CoinGecko bitcoin.</p>
             </Card>
 
             <Card>
@@ -1273,9 +1244,10 @@ function ReturnDiagnosticsPanel({ diagnostics }: { diagnostics: ReturnSanityDiag
   )
 }
 
-function MarketDataQualityPanel({ asset, provider, diagnostics, loading, error }: {
+function MarketDataQualityPanel({ asset, provider, resolution, diagnostics, loading, error }: {
   asset: Asset
   provider: ProviderStatus
+  resolution: SymbolResolutionDescription | null
   diagnostics: MarketPriceDiagnostics | null
   loading: boolean
   error: string | null
@@ -1285,6 +1257,14 @@ function MarketDataQualityPanel({ asset, provider, diagnostics, loading, error }
     : '—'
   const warnings = diagnostics?.warnings.length ? diagnostics.warnings : []
   const stooqWarning = provider.fallbackOrder.includes('stooq') && diagnostics?.quality !== 'ready'
+  const candidateSymbols = resolution?.resolutions
+    .flatMap((item) => item.candidates.map((candidate) => candidate.symbol))
+    .filter((symbol, index, all) => all.indexOf(symbol) === index)
+    .join(' -> ') || '—'
+  const inferredNotes = resolution?.resolutions
+    .flatMap((item) => item.candidates.filter((candidate) => candidate.inferred).map((candidate) => `${candidate.symbol}: ${candidate.note}`))
+    .slice(0, 4)
+    .join(' ') || null
 
   return (
     <div className="mt-4 border-t border-white/10 pt-4">
@@ -1300,6 +1280,8 @@ function MarketDataQualityPanel({ asset, provider, diagnostics, loading, error }
       <div className="grid gap-3 md:grid-cols-2">
         <InfoLine label="Provider" value={provider.provider} />
         <InfoLine label="Market symbol" value={asset.market_symbol || asset.symbol} />
+        <InfoLine label="Selected provider symbol" value={resolution?.primarySymbol ?? '—'} />
+        <InfoLine label="Candidate symbols" value={candidateSymbols} />
         <InfoLine label="Stored source symbol" value={diagnostics?.sourceSymbol ?? '—'} />
         <InfoLine label="Rows" value={diagnostics ? String(diagnostics.rowCount) : '—'} />
         <InfoLine label="Date range" value={diagnostics?.minPriceDate && diagnostics.maxPriceDate ? `${formatDate(diagnostics.minPriceDate)} → ${formatDate(diagnostics.maxPriceDate)}` : '—'} />
@@ -1319,6 +1301,7 @@ function MarketDataQualityPanel({ asset, provider, diagnostics, loading, error }
         <InfoLine label="Rate limits" value={provider.rateLimitDiagnostics} />
       </div>
       <p className="mt-3 text-xs leading-5 text-slate-500">{provider.notes}</p>
+      {inferredNotes ? <p className="mt-2 text-xs leading-5 text-slate-500">Symbol mapping inferred: {inferredNotes}</p> : null}
       {warnings.length > 0 || stooqWarning ? (
         <div className="mt-3 rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
           {[...warnings, ...(stooqWarning ? ['Stooq history looks partial; use CSV import fallback if provider backfill misses rows.'] : [])].join(' ')}
@@ -1466,6 +1449,7 @@ function BackfillResultPanel({ result, loading }: { result: BackfillResult | nul
                 <p className="font-semibold text-white">{item.symbol} · {item.sourceSymbol}</p>
                 <p className="mt-1 text-xs text-slate-500">{item.provider} · latest {item.latestPriceDate ?? '—'}</p>
                 {item.providerFallbackChain?.length ? <p className="mt-1 text-xs text-slate-500">Fallback: {item.providerFallbackChain.join(' -> ')}</p> : null}
+                {item.providerCandidateSymbols?.length ? <p className="mt-1 text-xs text-slate-500">Candidates: {item.providerCandidateSymbols.join(' -> ')}</p> : null}
               </div>
               <span className={`rounded-full px-3 py-1 text-xs font-semibold ${item.status === 'failed' ? 'bg-rose-500/10 text-rose-200' : item.status === 'partial' ? 'bg-amber-500/10 text-amber-100' : 'bg-emerald-500/10 text-emerald-200'}`}>{item.status}</span>
             </div>
