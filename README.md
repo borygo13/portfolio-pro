@@ -269,7 +269,7 @@ Zasady bezpieczeństwa:
 Providerzy:
 
 - Crypto: CoinGecko market chart range API dla zakresu 1Y; dla dłuższych publicznych zakresów używany jest bezpłatny fallback CryptoCompare, zapisywany pod stabilnym źródłem crypto, żeby nie dublować dziennych rekordów.
-- ETF/akcje/indeksy: EODHD jest głównym providerem historycznym, preferuje `assets.market_symbol`, a potem normalizuje `assets.symbol`; Stooq pozostaje fallbackiem. Ustaw server-side `EODHD_API_KEY`. Jeśli EODHD nie ma klucza albo symbolu, raport per aktywo pokaże fallback do Stooq oraz sugestię CSV importu.
+- ETF/akcje/indeksy: EODHD jest głównym providerem historycznym, a Stooq pozostaje fallbackiem. Backfill używa resolvera symboli providerów: z `assets.market_symbol` i `assets.symbol` buduje osobne kandydaty dla EODHD oraz Stooq zamiast zakładać, że jeden symbol pasuje do każdego źródła. Ustaw server-side `EODHD_API_KEY`. Jeśli EODHD nie ma klucza albo symbolu, raport per aktywo pokaże nieudane kandydaty, fallback do Stooq oraz sugestię CSV importu.
 - Stooq: fallback provider daily CSV. Jeśli Stooq wymaga klucza do CSV historycznego, ustaw server-side `STOOQ_API_KEY`.
 - FX: historyczne kursy NBP do PLN, zapisywane w `fx_rates`; jeśli kursu dla daty nie ma, `close_price_base` zostaje puste zamiast sztucznego przeliczenia.
 
@@ -296,9 +296,9 @@ npm run dev
 ```
 
 3. Wejdź do `Long-term -> Intelligence -> Backfill`.
-4. Dla ETF/akcji ustaw `market_symbol`, np. `IUSQ.DE`, `500.PA`, `CSPX.L`, `AAPL.US`. Dla BTC możesz użyć CoinGecko ID `bitcoin`.
+4. Dla ETF/akcji ustaw `market_symbol`, np. `IUSQ.DE`, `500.PA`, `CSPX.L`, `AAPL.US`. Resolver przetłumaczy go na provider-specific candidates, np. `IUSQ.DE` -> EODHD `IUSQ.XETRA` i Stooq `iusq.de`. Dla BTC możesz użyć CoinGecko ID `bitcoin`.
 5. Uruchom `Backfill selected asset` dla IUSQ.DE, 500.PA, CSPX.L oraz crypto BTC/BNB.
-6. Sprawdź raport per aktywo: provider, fallback chain, zapisane wiersze, adjusted rows, braki FX i ewentualne pozostałe rows/assets.
+6. Sprawdź raport per aktywo: provider, fallback chain, candidate symbols, wybrany `source_symbol`, zapisane wiersze, adjusted rows, braki FX i ewentualne pozostałe rows/assets.
 7. Wejdź na Dashboard i przełącz zakresy wykresów `30D/90D/1Y/3Y/5Y/MAX`.
 
 ### SQL verification
@@ -399,8 +399,9 @@ Migracja `supabase/stage-c5-2a-instrument-catalog.sql` dodaje tabelę `instrumen
 Model pól:
 
 - `symbol` to symbol widoczny dla użytkownika, np. `BTC`, `ETH`, `IUSQ.DE`, `AAPL`.
-- `market_symbol` to provider-facing symbol używany przez backfill/refresh/import, np. `bitcoin`, `ethereum`, `ripple`, `iusq.de`, `aapl.us`.
-- `provider` opisuje źródło danych, obecnie głównie `coingecko` dla crypto i `stooq` dla akcji/ETF/FX.
+- `market_symbol` to praktyczny symbol bazowy zapisany przy aktywie, np. `bitcoin`, `IUSQ.DE`, `AAPL.US`; od C5.6a nie musi być idealnym symbolem każdego providera.
+- Provider symbol to symbol wyliczony dla konkretnego źródła przez `src/lib/market/provider-symbols.ts`, np. EODHD `IUSQ.XETRA` albo Stooq `iusq.de`.
+- `provider` opisuje źródło danych, obecnie `coingecko`/`cryptocompare` dla crypto oraz `eodhd`/`stooq`/CSV dla akcji, ETF i indeksów.
 - `benchmark_candidate` oznacza pozycje pokazywane jako praktyczne propozycje benchmarków.
 
 RLS pozwala zalogowanym użytkownikom czytać tylko aktywne wpisy katalogu. Klient nie ma grantów do insert/update/delete katalogu.
@@ -419,8 +420,12 @@ Przykłady:
 - `BTC` -> `bitcoin`
 - `ETH` -> `ethereum`
 - `XRP` -> `ripple`
-- `IUSQ.DE` -> `iusq.de`
-- `AAPL` -> `aapl.us`
+- `IUSQ.DE` display/market symbol -> EODHD `IUSQ.XETRA`, Stooq `iusq.de`
+- `AAPL` lub `AAPL.US` -> EODHD `AAPL.US`, Stooq `aapl.us`
+- `CSPX.L` -> EODHD `CSPX.LSE`, Stooq `cspx.uk`
+- `500.PA` -> EODHD `500.PA`, Stooq `500.fr`/`500.pa`
+
+CSV/manual pozostaje jawny fallback dla historii, której providerzy nie potrafią pobrać. Import CSV zapisuje wybrany `source` i `source_symbol`, ale nie zmienia `symbol` widocznego dla użytkownika.
 
 Żeby dodać kolejne presety, dodaj nową addytywną migrację z `insert into instrument_catalog (...) values (...) on conflict (provider, market_symbol) do update ...`. Nie zmieniaj ręcznie istniejących symboli użytkownika bez świadomego zastosowania presetu w UI.
 
