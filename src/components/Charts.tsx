@@ -16,7 +16,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { PLN, PCT } from '@/lib/format'
+import { PLN, PCT, formatCurrencyValue } from '@/lib/format'
 
 const COLORS = ['#8b5cf6', '#06b6d4', '#22c55e', '#f59e0b', '#ef4444', '#64748b']
 
@@ -105,9 +105,43 @@ export function EquityChart({ data, range = 'MAX' }: { data: ({ date?: string; m
   )
 }
 
-export function AssetHistoryChart({ data, range = 'MAX' }: { data: { date?: string; label: string; price: number }[]; range?: ChartRange }) {
+type AssetHistoryPoint = {
+  date?: string
+  label: string
+  price: number
+  currency?: string
+  basePrice?: number | null
+  baseCurrency?: string | null
+  fxRateToBase?: number | null
+  fxMissing?: boolean
+}
+
+function AssetHistoryTooltip({ active, payload, label }: { active?: boolean; payload?: any[]; label?: string }) {
+  if (!active || !payload?.length) return null
+  const point = payload[0]?.payload as AssetHistoryPoint | undefined
+  if (!point) return null
+  const currency = point.currency ?? 'PLN'
+  const baseCurrency = point.baseCurrency ?? 'PLN'
+  const hasBaseEstimate = point.basePrice != null && Number.isFinite(point.basePrice) && point.basePrice > 0 && baseCurrency !== currency
+  const fxNote = hasBaseEstimate && point.fxRateToBase
+    ? `FX: 1 ${currency} ≈ ${point.fxRateToBase.toLocaleString('pl-PL', { maximumFractionDigits: 4 })} ${baseCurrency} on ${fullDateLabel(point.date ?? label)}`
+    : null
+
+  return (
+    <div style={tooltip} className="space-y-1 px-3 py-2 text-sm">
+      <p className="font-semibold text-slate-200">{fullDateLabel(point.date ?? label)}</p>
+      <p className="text-cyan-100">Cena: {formatCurrencyValue(point.price, currency, 2)}</p>
+      {hasBaseEstimate ? <p className="text-slate-300">≈ {formatCurrencyValue(point.basePrice ?? 0, baseCurrency, 2)}</p> : null}
+      {point.fxMissing ? <p className="text-amber-100">{baseCurrency} estimate unavailable: missing FX for this date.</p> : null}
+      {fxNote ? <p className="text-xs text-slate-500">{fxNote}</p> : null}
+    </div>
+  )
+}
+
+export function AssetHistoryChart({ data, range = 'MAX' }: { data: AssetHistoryPoint[]; range?: ChartRange }) {
   const chartData = data.map((item) => ({ ...item, date: item.date ?? item.label }))
   const axisRange = effectiveAxisRange(chartData, range)
+  const currency = chartData[0]?.currency ?? 'PLN'
 
   return (
     <ResponsiveContainer width="100%" height={280}>
@@ -121,8 +155,8 @@ export function AssetHistoryChart({ data, range = 'MAX' }: { data: { date?: stri
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
         <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} />
         <YAxis width={58} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => Math.round(Number(v)).toLocaleString('pl-PL')} />
-        <Tooltip formatter={(v) => PLN.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
-        <Area type="monotone" dataKey="price" name="Cena" stroke="#06b6d4" strokeWidth={3} fill="url(#assetHistoryGradient)" />
+        <Tooltip content={<AssetHistoryTooltip />} />
+        <Area type="monotone" dataKey="price" name={`Cena ${currency}`} stroke="#06b6d4" strokeWidth={3} fill="url(#assetHistoryGradient)" />
       </AreaChart>
     </ResponsiveContainer>
   )
