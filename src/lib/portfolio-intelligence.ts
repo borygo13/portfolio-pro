@@ -314,6 +314,14 @@ export function calculatePerformanceMetrics(input: {
 }
 
 export function buildBenchmarkComparison(snapshots: PortfolioSnapshot[], benchmarkHistory: MarketPriceHistoryPoint[]): BenchmarkPoint[] {
+  const benchmarkValue = (point: MarketPriceHistoryPoint) => {
+    const baseValue = num(point.close_price_base)
+    if (baseValue > 0) return baseValue
+    const sourceCurrency = (point.source_currency ?? '').toUpperCase()
+    const baseCurrency = (point.base_currency ?? '').toUpperCase()
+    const sourceValue = num(point.close_price)
+    return sourceCurrency && sourceCurrency === baseCurrency && sourceValue > 0 ? sourceValue : null
+  }
   const sortedSnapshots = snapshots
     .slice()
     .filter((snapshot) => num(snapshot.total_value) > 0)
@@ -321,7 +329,7 @@ export function buildBenchmarkComparison(snapshots: PortfolioSnapshot[], benchma
   const sortedBenchmark = benchmarkHistory
     .slice()
     .sort((a, b) => a.price_date.localeCompare(b.price_date))
-    .filter((point) => num(point.close_price_base ?? point.close_price) > 0)
+    .filter((point) => benchmarkValue(point) != null)
 
   if (sortedSnapshots.length === 0 || sortedBenchmark.length === 0) return []
 
@@ -337,8 +345,9 @@ export function buildBenchmarkComparison(snapshots: PortfolioSnapshot[], benchma
     }
 
     const benchmark = sortedBenchmark[benchmarkIndex]
-    if (benchmark.price_date <= snapshot.snapshot_date && daysBetween(benchmark.price_date, snapshot.snapshot_date) <= 10) {
-      points.push({ snapshot, benchmarkPrice: num(benchmark.close_price_base ?? benchmark.close_price) })
+    const price = benchmarkValue(benchmark)
+    if (price != null && benchmark.price_date <= snapshot.snapshot_date && daysBetween(benchmark.price_date, snapshot.snapshot_date) <= 10) {
+      points.push({ snapshot, benchmarkPrice: price })
     }
   }
 

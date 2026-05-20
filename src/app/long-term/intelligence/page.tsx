@@ -6,7 +6,7 @@ import { Banknote, BarChart3, CheckCircle2, FileUp, History, Loader2, Percent, P
 import { BenchmarkComparisonChart, BenchmarkRelativeChart, DrawdownCurveChart, MonthlyDividendChart, RollingReturnChart } from '@/components/Charts'
 import { Card, PageHeader, Shell, StatCard, TrustBadge } from '@/components/Shell'
 import { projectEdoBond, summarizeEdoBonds } from '@/lib/bond-engine'
-import { PLN, PCT } from '@/lib/format'
+import { PLN, PCT, formatCurrencyValue } from '@/lib/format'
 import {
   buildAllocationDrift,
   buildMonthlyDividendPoints,
@@ -243,7 +243,8 @@ function filterCatalogPresets(rows: InstrumentCatalogRow[], query: string) {
 }
 
 function catalogMeta(row: InstrumentCatalogRow) {
-  return `${row.provider} · ${row.category.replaceAll('_', ' ')} · ${row.currency}${row.exchange ? ` · ${row.exchange}` : ''}`
+  const providerChain = providerStatusForAsset({ asset_type: row.asset_type, symbol: row.symbol, price_source: row.provider }).provider
+  return `${row.asset_type} · ${row.currency}${row.exchange ? ` · ${row.exchange}` : ''} · Provider chain: ${providerChain}`
 }
 
 function metricOrReason(value: number | null, reason: string | null | undefined) {
@@ -904,8 +905,8 @@ export default function PortfolioIntelligencePage() {
               {currencies.map((currency) => (
                 <div key={currency} className="rounded-2xl bg-white/[0.04] p-4">
                   <p className="text-xs text-slate-500">{currency} balance</p>
-                  <p className="mt-2 text-xl font-bold text-white">{PLN.format(cashSummary.balanceByCurrency[currency])}</p>
-                  <p className="mt-1 text-xs text-slate-500">Contribution: {PLN.format(cashSummary.contributionByCurrency[currency])}</p>
+                  <p className="mt-2 text-xl font-bold text-white">{formatCurrencyValue(cashSummary.balanceByCurrency[currency], currency)}</p>
+                  <p className="mt-1 text-xs text-slate-500">Contribution: {formatCurrencyValue(cashSummary.contributionByCurrency[currency], currency)}</p>
                 </div>
               ))}
             </div>
@@ -917,9 +918,9 @@ export default function PortfolioIntelligencePage() {
       {activeTab === 'dividends' ? (
         <div className="space-y-6">
           <div className="grid gap-4 md:grid-cols-3">
-            <StatCard icon={Banknote} label="Dividend net" value={PLN.format(dividendSummary.netBase)} sub={baseCurrency} tone="emerald" />
-            <StatCard icon={Percent} label="Dividend tax" value={PLN.format(dividendSummary.taxBase)} sub="withholding / PIT" tone="cyan" />
-            <StatCard icon={TrendingUp} label="Dividend gross" value={PLN.format(dividendSummary.grossBase)} sub={`${dividendRecords.length} rekordów`} tone="violet" />
+            <StatCard icon={Banknote} label="Dividend net" value={formatCurrencyValue(dividendSummary.netBase, baseCurrency, 0)} sub={baseCurrency} tone="emerald" />
+            <StatCard icon={Percent} label="Dividend tax" value={formatCurrencyValue(dividendSummary.taxBase, baseCurrency, 0)} sub="withholding / PIT" tone="cyan" />
+            <StatCard icon={TrendingUp} label="Dividend gross" value={formatCurrencyValue(dividendSummary.grossBase, baseCurrency, 0)} sub={`${dividendRecords.length} rekordów`} tone="violet" />
           </div>
           <div className="grid gap-6 2xl:grid-cols-[.8fr_1.2fr]">
             <Card>
@@ -944,11 +945,11 @@ export default function PortfolioIntelligencePage() {
             </Card>
             <Card>
               <h3 className="text-lg font-bold text-white">Dywidendy miesięczne</h3>
-              <p className="mt-1 text-sm text-slate-500">Netto i podatek w walucie bazowej portfolio.</p>
+              <p className="mt-1 text-sm text-slate-500">Wykres podsumowuje tylko dywidendy zapisane w walucie bazowej portfolio. Tabela niżej pokazuje walutę źródłową jako wartość główną.</p>
               {monthlyDividends.length > 0 ? <MonthlyDividendChart data={monthlyDividends} /> : <EmptyState text="Brak dywidend w walucie bazowej." />}
             </Card>
           </div>
-          <Card><DividendTable rows={dividendRecords} onDelete={removeDividend} saving={saving} /></Card>
+          <Card><DividendTable rows={dividendRecords} onDelete={removeDividend} saving={saving} baseCurrency={baseCurrency} /></Card>
         </div>
       ) : null}
 
@@ -1255,6 +1256,12 @@ function MarketDataQualityPanel({ asset, provider, resolution, diagnostics, load
   const sourceDistribution = diagnostics?.sourceDistribution.length
     ? diagnostics.sourceDistribution.map((item) => `${item.source} ${item.count}`).join(' · ')
     : '—'
+  const sourceCurrencyDistribution = diagnostics?.sourceCurrencyDistribution.length
+    ? diagnostics.sourceCurrencyDistribution.map((item) => `${item.source} ${item.count}`).join(' · ')
+    : '—'
+  const baseCurrencyDistribution = diagnostics?.baseCurrencyDistribution.length
+    ? diagnostics.baseCurrencyDistribution.map((item) => `${item.source} ${item.count}`).join(' · ')
+    : '—'
   const warnings = diagnostics?.warnings.length ? diagnostics.warnings : []
   const stooqWarning = provider.fallbackOrder.includes('stooq') && diagnostics?.quality !== 'ready'
   const candidateSymbols = resolution?.resolutions
@@ -1283,14 +1290,21 @@ function MarketDataQualityPanel({ asset, provider, resolution, diagnostics, load
         <InfoLine label="Selected provider symbol" value={resolution?.primarySymbol ?? '—'} />
         <InfoLine label="Candidate symbols" value={candidateSymbols} />
         <InfoLine label="Stored source symbol" value={diagnostics?.sourceSymbol ?? '—'} />
+        <InfoLine label="Chart mode" value={`Source currency${diagnostics?.sourceCurrency ? ` · ${diagnostics.sourceCurrency}` : ''}`} />
+        <InfoLine label="Valuation currency" value={diagnostics?.baseCurrency ?? '—'} />
         <InfoLine label="Rows" value={diagnostics ? String(diagnostics.rowCount) : '—'} />
+        <InfoLine label="Source price rows" value={diagnostics ? `${diagnostics.sourcePriceRows}/${diagnostics.rowCount}` : '—'} />
+        <InfoLine label="Base price rows" value={diagnostics ? `${diagnostics.basePriceRows}/${diagnostics.rowCount}` : '—'} />
+        <InfoLine label="Valuation-ready rows" value={diagnostics ? `${diagnostics.valuationReadyRows}/${diagnostics.rowCount}` : '—'} />
+        <InfoLine label="FX missing rows" value={diagnostics ? String(diagnostics.fxMissingRows) : '—'} />
         <InfoLine label="Date range" value={diagnostics?.minPriceDate && diagnostics.maxPriceDate ? `${formatDate(diagnostics.minPriceDate)} → ${formatDate(diagnostics.maxPriceDate)}` : '—'} />
         <InfoLine label="Coverage" value={diagnostics?.historyCoveragePct == null ? '—' : `${PCT.format(diagnostics.historyCoveragePct)} · ${diagnostics.expectedTradingDays} weekdays`} />
         <InfoLine label="Latest price" value={diagnostics?.latestPriceDate ? formatDate(diagnostics.latestPriceDate) : '—'} />
         <InfoLine label="Recent gap" value={diagnostics?.recentCalendarGapDays == null ? '—' : `${diagnostics.recentCalendarGapDays} calendar days · ${diagnostics.missingRecentTradingDays} weekdays`} />
         <InfoLine label="Recent history gaps" value={diagnostics ? `${diagnostics.recentGapCount} · max ${diagnostics.maxRecentGapDays} days` : '—'} />
-        <InfoLine label="Base price rows" value={diagnostics ? `${diagnostics.basePriceRows}/${diagnostics.rowCount}` : '—'} />
         <InfoLine label="Sources" value={sourceDistribution} />
+        <InfoLine label="Source currencies" value={sourceCurrencyDistribution} />
+        <InfoLine label="Base currencies" value={baseCurrencyDistribution} />
         <InfoLine label="Portfolio backfill" value={diagnostics?.readyForPortfolioHistory ? 'Ready' : 'Limited'} />
         <InfoLine label="Historical support" value={provider.supportsHistorical ? 'Yes' : 'No'} />
         <InfoLine label="Latest support" value={provider.supportsLatest ? 'Yes' : 'No'} />
@@ -1324,7 +1338,7 @@ function LedgerTable({ entries, onDelete, saving }: { entries: CashLedgerEntry[]
             <tr key={entry.id} className="border-t border-white/10 text-slate-300">
               <td className="p-4">{formatDate(entry.entry_date)}</td>
               <td className="p-4">{entry.entry_type}</td>
-              <td className="p-4 text-right font-semibold text-white">{PLN.format(num(entry.amount))} {entry.currency}</td>
+              <td className="p-4 text-right font-semibold text-white">{formatCurrencyValue(num(entry.amount), entry.currency)}</td>
               <td className="p-4 text-slate-500">{entry.note ?? '—'}</td>
               <td className="p-4 text-right"><button disabled={saving} onClick={() => onDelete(entry.id)} className="rounded-xl p-2 text-slate-500 transition hover:bg-white/10 hover:text-rose-300"><Trash2 size={16} /></button></td>
             </tr>
@@ -1335,7 +1349,7 @@ function LedgerTable({ entries, onDelete, saving }: { entries: CashLedgerEntry[]
   )
 }
 
-function DividendTable({ rows, onDelete, saving }: { rows: DividendRecord[]; onDelete: (id: string) => void; saving: boolean }) {
+function DividendTable({ rows, onDelete, saving, baseCurrency }: { rows: DividendRecord[]; onDelete: (id: string) => void; saving: boolean; baseCurrency: SupportedCashCurrency }) {
   if (rows.length === 0) return <EmptyState text="Brak dywidend." />
   return (
     <div className="overflow-hidden rounded-2xl border border-white/10">
@@ -1348,9 +1362,12 @@ function DividendTable({ rows, onDelete, saving }: { rows: DividendRecord[]; onD
             <tr key={row.id} className="border-t border-white/10 text-slate-300">
               <td className="p-4">{formatDate(row.payment_date)}</td>
               <td className="p-4"><div className="font-semibold text-white">{row.assets?.symbol ?? row.asset_id}</div><div className="text-xs text-slate-500">{row.assets?.name ?? row.note ?? '—'}</div></td>
-              <td className="p-4 text-right">{PLN.format(num(row.gross_amount))} {row.currency}</td>
-              <td className="p-4 text-right text-amber-200">{PLN.format(num(row.tax_amount))}</td>
-              <td className="p-4 text-right font-semibold text-emerald-300">{PLN.format(num(row.net_amount))}</td>
+              <td className="p-4 text-right">{formatCurrencyValue(num(row.gross_amount), row.currency)}</td>
+              <td className="p-4 text-right text-amber-200">{formatCurrencyValue(num(row.tax_amount), row.currency)}</td>
+              <td className="p-4 text-right">
+                <div className="font-semibold text-emerald-300">{formatCurrencyValue(num(row.net_amount), row.currency)}</div>
+                {row.currency !== baseCurrency ? <div className="text-xs text-slate-500">{baseCurrency} estimate unavailable: missing historical FX.</div> : null}
+              </td>
               <td className="p-4 text-right"><button disabled={saving} onClick={() => onDelete(row.id)} className="rounded-xl p-2 text-slate-500 transition hover:bg-white/10 hover:text-rose-300"><Trash2 size={16} /></button></td>
             </tr>
           ))}

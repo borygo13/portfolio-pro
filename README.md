@@ -275,6 +275,23 @@ Providerzy:
 
 Daily cron `/api/cron/prices` pozostaje mechanizmem przyszłych dziennych aktualizacji. Backfill uzupełnia przeszłość w `market_prices`, a cron dopisuje kolejne dni.
 
+### Currency rules for market data
+
+- `close_price` is the instrument/source price in the natural quote currency from the provider.
+- `source_currency` is the currency of `close_price`, for example AAPL in USD, IUSQ.DE/500.PA in EUR, GPW assets in PLN, and crypto in the quote currency returned by the crypto provider.
+- `close_price_base` is the converted portfolio/base-currency value, currently usually PLN, and is used for portfolio valuation, allocation, P/L, contribution charts, snapshots and performance analytics.
+- Instrument-level asset charts default to source currency and never mix source prices with base-currency prices in one series.
+- When historical FX exists, instrument tooltips may show an approximate base value, for example `250 USD ≈ 1 000 PLN` with the historical FX rate for that date.
+- If FX is missing for a non-base asset, the app shows the source price only and reports that the PLN/base estimate is unavailable. It does not silently use FX = 1 for USD/EUR -> PLN.
+- Manual CSV import follows the same rule: source values fill `close_price`; base values are written only when the source currency equals the portfolio base currency or when a safe FX conversion exists.
+
+Examples:
+
+- AAPL chart: USD primary, approximate PLN secondary when FX exists.
+- IUSQ.DE / 500.PA chart: EUR primary, approximate PLN secondary when FX exists.
+- GPW asset chart: PLN primary and portfolio value PLN.
+- BTC/crypto chart: provider quote currency as stored in `source_currency`; current public crypto backfill stores PLN quotes unless a future provider adds USD quotes.
+
 ### Test backfillu w UI
 
 1. Ustaw env vars:

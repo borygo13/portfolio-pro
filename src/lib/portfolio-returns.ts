@@ -622,8 +622,12 @@ function recoveryMetric(drawdowns: DrawdownCurvePoint[], validIntervals: ReturnI
 }
 
 function benchmarkValue(point: MarketPriceHistoryPoint) {
-  const value = n(point.close_price_base ?? point.close_price)
-  return value > 0 ? value : null
+  const baseValue = n(point.close_price_base)
+  if (baseValue > 0) return baseValue
+  const sourceCurrency = (point.source_currency ?? '').toUpperCase()
+  const baseCurrency = (point.base_currency ?? '').toUpperCase()
+  const sourceValue = n(point.close_price)
+  return sourceCurrency && sourceCurrency === baseCurrency && sourceValue > 0 ? sourceValue : null
 }
 
 type NormalizedBenchmarkPoint = {

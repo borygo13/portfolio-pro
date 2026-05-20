@@ -192,12 +192,58 @@ function buildPriceWarnings(assets: Asset[], prices: AssetPrice[]): PriceWarning
   return warnings
 }
 
-function buildAssetHistoryCurve(history: MarketPriceHistoryPoint[]) {
-  return history.map((point) => ({
-    date: point.price_date,
-    label: snapshotLabel(point.price_date),
-    price: point.close_price_base == null ? n(point.close_price) : n(point.close_price_base),
-  }))
+function currencyCode(value: string | null | undefined, fallback = 'PLN') {
+  return (value || fallback).trim().toUpperCase()
+}
+
+function dominantCurrency(history: MarketPriceHistoryPoint[], asset: Asset | null, fallback: string) {
+  const counts = new Map<string, number>()
+  for (const point of history) {
+    const currency = currencyCode(point.source_currency, asset?.currency ?? fallback)
+    counts.set(currency, (counts.get(currency) ?? 0) + 1)
+  }
+  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? currencyCode(asset?.currency, fallback)
+}
+
+function buildAssetHistoryCurve(history: MarketPriceHistoryPoint[], asset: Asset | null, portfolioCurrency = 'PLN') {
+  const displayCurrency = dominantCurrency(history, asset, portfolioCurrency)
+  const baseCurrency = currencyCode(history.find((point) => point.base_currency)?.base_currency, portfolioCurrency)
+  let skippedCurrencyRows = 0
+  let baseEstimateRows = 0
+  let fxMissingRows = 0
+
+  const points = history.flatMap((point) => {
+    const sourceCurrency = currencyCode(point.source_currency, asset?.currency ?? displayCurrency)
+    const price = n(point.close_price)
+    if (sourceCurrency !== displayCurrency) {
+      skippedCurrencyRows += 1
+      return []
+    }
+    if (price <= 0) return []
+
+    const pointBaseCurrency = currencyCode(point.base_currency, baseCurrency)
+    const basePrice = n(point.close_price_base)
+    const hasBaseEstimate = basePrice > 0
+    if (hasBaseEstimate) baseEstimateRows += 1
+    if (sourceCurrency !== pointBaseCurrency && !hasBaseEstimate) fxMissingRows += 1
+
+    return [{
+      date: point.price_date,
+      label: snapshotLabel(point.price_date),
+      price,
+      currency: sourceCurrency,
+      basePrice: hasBaseEstimate ? basePrice : null,
+      baseCurrency: pointBaseCurrency,
+      fxRateToBase: n(point.fx_rate_to_base) || (hasBaseEstimate ? basePrice / price : null),
+      fxMissing: sourceCurrency !== pointBaseCurrency && !hasBaseEstimate,
+    }]
+  })
+
+  const warnings: string[] = []
+  if (skippedCurrencyRows > 0) warnings.push(`${skippedCurrencyRows} row(s) skipped because source currency differs from ${displayCurrency}.`)
+  if (fxMissingRows > 0) warnings.push(`${fxMissingRows} row(s) have source prices but no ${baseCurrency} estimate because FX is missing.`)
+
+  return { points, displayCurrency, baseCurrency, skippedCurrencyRows, baseEstimateRows, fxMissingRows, warnings }
 }
 
 function refreshStatusLabel(status: PriceRefreshRun['status']) {
@@ -278,7 +324,7 @@ export default function Dashboard() {
   const equityCurve = snapshotEquityCurve.length > 0 ? filterByChartRange(snapshotEquityCurve, portfolioRange) : fallbackEquityCurve
   const priceWarnings = useMemo(() => buildPriceWarnings(assets, prices), [assets, prices])
   const selectedAsset = useMemo(() => marketActivePositions.find((p) => p.asset.id === selectedAssetId)?.asset ?? null, [marketActivePositions, selectedAssetId])
-  const assetHistoryCurve = useMemo(() => buildAssetHistoryCurve(assetHistory), [assetHistory])
+  const assetHistoryCurve = useMemo(() => buildAssetHistoryCurve(assetHistory, selectedAsset, portfolio?.currency ?? 'PLN'), [assetHistory, selectedAsset, portfolio?.currency])
   const dividendSum = dividends.reduce((s, d) => s + d.value, 0)
   const bondPnl = edoSummary.currentValueAfterTax - edoSummary.principal
 
@@ -420,7 +466,15 @@ export default function Dashboard() {
         <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <h3 className="text-lg font-bold text-white">Historia aktywa</h3>
-            <p className="mt-1 text-sm text-slate-500">Dzienna historia z `market_prices` dla wybranego aktywnego aktywa.</p>
+            <p className="mt-1 text-sm text-slate-500">Dzienna historia z `market_prices` w naturalnej walucie instrumentu. Wycena portfela nadal używa waluty bazowej.</p>
+            {selectedAsset ? (
+              <p className="mt-2 text-xs text-slate-500">
+                Chart currency: {assetHistoryCurve.displayCurrency}
+                {assetHistoryCurve.baseEstimateRows > 0 && assetHistoryCurve.displayCurrency !== assetHistoryCurve.baseCurrency
+                  ? ` · approx ${assetHistoryCurve.baseCurrency} available in tooltip`
+                  : ''}
+              </p>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <select
@@ -448,10 +502,22 @@ export default function Dashboard() {
           <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Ładowanie historii cen...</div>
         ) : assetHistoryError ? (
           <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-6 text-sm text-rose-100">{assetHistoryError}</div>
-        ) : assetHistoryCurve.length === 0 ? (
+        ) : assetHistoryCurve.points.length === 0 ? (
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 text-sm text-slate-500">{selectedAsset ? `Brak historii market_prices dla ${selectedAsset.symbol}.` : 'Brak historii cen.'}</div>
         ) : (
-          <AssetHistoryChart data={assetHistoryCurve} range={assetHistoryRange} />
+          <>
+            {assetHistoryCurve.warnings.length > 0 ? (
+              <div className="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
+                {assetHistoryCurve.warnings.join(' ')}
+              </div>
+            ) : null}
+            <AssetHistoryChart data={assetHistoryCurve.points} range={assetHistoryRange} />
+            <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500">
+              <span>Source price: {assetHistoryCurve.displayCurrency}</span>
+              <span>Portfolio estimate: {assetHistoryCurve.baseCurrency}</span>
+              {assetHistoryCurve.baseEstimateRows > 0 ? <span>{assetHistoryCurve.baseEstimateRows} rows with base estimate</span> : <span>{assetHistoryCurve.baseCurrency} estimate unavailable when FX is missing</span>}
+            </div>
+          </>
         )}
       </Card>
 

@@ -15,3 +15,16 @@ export const PCT = new Intl.NumberFormat('pl-PL', {
   minimumFractionDigits: 1,
   maximumFractionDigits: 2,
 })
+
+export function formatCurrencyValue(value: number, currency = 'PLN', maximumFractionDigits = 2) {
+  const code = (currency || 'PLN').toUpperCase()
+  try {
+    return new Intl.NumberFormat('pl-PL', {
+      style: 'currency',
+      currency: code,
+      maximumFractionDigits,
+    }).format(value)
+  } catch {
+    return `${value.toLocaleString('pl-PL', { maximumFractionDigits })} ${code}`
+  }
+}

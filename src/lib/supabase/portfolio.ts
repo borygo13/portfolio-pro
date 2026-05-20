@@ -297,6 +297,7 @@ export type MarketPriceHistoryPoint = {
   price_date: string
   close_price: number
   close_price_base: number | null
+  fx_rate_to_base: number | null
   base_currency: string | null
   source_currency: string | null
   fetched_at: string
@@ -310,10 +311,13 @@ export type MarketPriceSourceDistribution = {
 export type MarketPriceDiagnostics = {
   asset_id: string
   rowCount: number
+  sourcePriceRows: number
   minPriceDate: string | null
   maxPriceDate: string | null
   latestPriceDate: string | null
   latestFetchedAt: string | null
+  sourceCurrency: string | null
+  baseCurrency: string | null
   expectedTradingDays: number
   historyCoveragePct: number | null
   recentCalendarGapDays: number | null
@@ -321,9 +325,13 @@ export type MarketPriceDiagnostics = {
   recentGapCount: number
   maxRecentGapDays: number
   sourceDistribution: MarketPriceSourceDistribution[]
+  sourceCurrencyDistribution: MarketPriceSourceDistribution[]
+  baseCurrencyDistribution: MarketPriceSourceDistribution[]
   sourceSymbol: string | null
   basePriceRows: number
   missingBasePriceRows: number
+  valuationReadyRows: number
+  fxMissingRows: number
   readyForPortfolioHistory: boolean
   quality: 'ready' | 'limited' | 'missing'
   warnings: string[]
@@ -398,7 +406,7 @@ function chartRangeLimit(range: ChartRange) {
 export async function listMarketPriceHistory(portfolioId: string, assetId: string, range: ChartRange = '1Y'): Promise<MarketPriceHistoryPoint[]> {
   let query = supabase
     .from('market_prices')
-    .select('id,portfolio_id,asset_id,price_date,close_price,close_price_base,base_currency,source_currency,fetched_at')
+    .select('id,portfolio_id,asset_id,price_date,close_price,close_price_base,fx_rate_to_base,base_currency,source_currency,fetched_at')
     .eq('portfolio_id', portfolioId)
     .eq('asset_id', assetId)
 
@@ -416,7 +424,7 @@ export async function listMarketPriceHistory(portfolioId: string, assetId: strin
 export async function getMarketPriceDiagnostics(portfolioId: string, assetId: string): Promise<MarketPriceDiagnostics> {
   const { data, error } = await supabase
     .from('market_prices')
-    .select('asset_id,source,source_symbol,price_date,close_price,close_price_base,source_currency,base_currency,fetched_at')
+    .select('asset_id,source,source_symbol,price_date,close_price,close_price_base,source_currency,base_currency,fx_rate_to_base,fetched_at')
     .eq('portfolio_id', portfolioId)
     .eq('asset_id', assetId)
     .order('price_date', { ascending: true })
@@ -433,6 +441,7 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
     close_price_base: number | null
     source_currency: string | null
     base_currency: string | null
+    fx_rate_to_base: number | null
     fetched_at: string | null
   }[]
   const dates = rows.map((row) => marketDateKey(row.price_date)).filter(Boolean)
@@ -458,27 +467,50 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
 
   const sourceCounts = new Map<string, number>()
   const sourceSymbolCounts = new Map<string, number>()
+  const sourceCurrencyCounts = new Map<string, number>()
+  const baseCurrencyCounts = new Map<string, number>()
+  let sourcePriceRows = 0
   let basePriceRows = 0
   let missingBasePriceRows = 0
+  let valuationReadyRows = 0
+  let fxMissingRows = 0
   for (const row of rows) {
     const source = row.source || 'unknown'
+    const sourceCurrency = (row.source_currency || 'unknown').toUpperCase()
+    const baseCurrency = (row.base_currency || 'unknown').toUpperCase()
     sourceCounts.set(source, (sourceCounts.get(source) ?? 0) + 1)
+    sourceCurrencyCounts.set(sourceCurrency, (sourceCurrencyCounts.get(sourceCurrency) ?? 0) + 1)
+    baseCurrencyCounts.set(baseCurrency, (baseCurrencyCounts.get(baseCurrency) ?? 0) + 1)
     if (row.source_symbol) sourceSymbolCounts.set(row.source_symbol, (sourceSymbolCounts.get(row.source_symbol) ?? 0) + 1)
+    if (Number(row.close_price ?? 0) > 0) sourcePriceRows += 1
     if (Number(row.close_price_base ?? 0) > 0) basePriceRows += 1
     else missingBasePriceRows += 1
+    if (Number(row.close_price_base ?? 0) > 0 || (sourceCurrency === baseCurrency && Number(row.close_price ?? 0) > 0)) valuationReadyRows += 1
+    if (sourceCurrency !== baseCurrency && Number(row.close_price ?? 0) > 0 && Number(row.close_price_base ?? 0) <= 0) fxMissingRows += 1
   }
 
   const sourceDistribution = Array.from(sourceCounts.entries())
     .map(([source, count]) => ({ source, count }))
     .sort((a, b) => b.count - a.count)
+  const sourceCurrencyDistribution = Array.from(sourceCurrencyCounts.entries())
+    .map(([source, count]) => ({ source, count }))
+    .sort((a, b) => b.count - a.count)
+  const baseCurrencyDistribution = Array.from(baseCurrencyCounts.entries())
+    .map(([source, count]) => ({ source, count }))
+    .sort((a, b) => b.count - a.count)
   const sourceSymbol = Array.from(sourceSymbolCounts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
+  const sourceCurrency = sourceCurrencyDistribution[0]?.source === 'unknown' ? null : sourceCurrencyDistribution[0]?.source ?? null
+  const baseCurrency = baseCurrencyDistribution[0]?.source === 'unknown' ? null : baseCurrencyDistribution[0]?.source ?? null
   const warnings: string[] = []
   if (rows.length === 0) warnings.push('No historical market_prices rows for this asset.')
+  if (sourceCurrencyDistribution.filter((item) => item.source !== 'unknown').length > 1) warnings.push('Multiple source currencies detected; source-currency charts use one currency at a time.')
   if (recentCalendarGapDays != null && recentCalendarGapDays > 7) warnings.push(`Latest price is ${recentCalendarGapDays} calendar days old.`)
   if (missingRecentTradingDays > 3) warnings.push(`${missingRecentTradingDays} recent weekdays have no market price rows.`)
   if (recentGapCount > 0) warnings.push(`${recentGapCount} recent history gap(s) exceed 4 calendar days.`)
   if (historyCoveragePct != null && historyCoveragePct < 0.7) warnings.push(`History coverage is about ${Math.round(historyCoveragePct * 100)}% of expected weekdays.`)
   if (rows.length > 0 && missingBasePriceRows / rows.length > 0.5) warnings.push('Most rows do not have close_price_base; portfolio valuation needs FX coverage.')
+  if (fxMissingRows > 0) warnings.push(`${fxMissingRows} row(s) have source prices but no base-currency FX conversion.`)
+  if (rows.length > 0 && valuationReadyRows < 2) warnings.push('Portfolio valuation is not ready because fewer than two rows have safe base-currency values.')
 
   const quality: MarketPriceDiagnostics['quality'] = rows.length === 0
     ? 'missing'
@@ -489,10 +521,13 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
   return {
     asset_id: assetId,
     rowCount: rows.length,
+    sourcePriceRows,
     minPriceDate,
     maxPriceDate,
     latestPriceDate: maxPriceDate,
     latestFetchedAt,
+    sourceCurrency,
+    baseCurrency,
     expectedTradingDays,
     historyCoveragePct,
     recentCalendarGapDays,
@@ -500,10 +535,14 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
     recentGapCount,
     maxRecentGapDays,
     sourceDistribution,
+    sourceCurrencyDistribution,
+    baseCurrencyDistribution,
     sourceSymbol,
     basePriceRows,
     missingBasePriceRows,
-    readyForPortfolioHistory: rows.length >= 2 && quality !== 'missing',
+    valuationReadyRows,
+    fxMissingRows,
+    readyForPortfolioHistory: valuationReadyRows >= 2 && quality !== 'missing',
     quality,
     warnings,
   }
