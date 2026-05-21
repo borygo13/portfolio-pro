@@ -429,9 +429,31 @@ Migracja celowo używa tylko prostych indeksów btree. Full-text/expression inde
 UI:
 
 ```text
+Long-term -> Positions -> Aktywa -> Szukaj instrumentu
 Long-term -> Intelligence -> Backfill -> Preset z katalogu
 Long-term -> Intelligence -> Benchmark -> Katalog benchmarków
 ```
+
+### Stage C5.7 - Smart asset onboarding
+
+Widok `Long-term -> Positions` ma teraz prostszy flow dodawania aktywa:
+
+1. Wpisz naturalną frazę w `Szukaj instrumentu`, np. `Apple`, `AAPL`, `Nasdaq`, `S&P 500`, `sp500`, `MSCI World`, `ACWI`, `Bitcoin`, `BTC`, `CD Projekt`, `GPW`, `ETF`.
+2. Wybierz preset. Formularz uzupełni symbol widoczny w portfelu, nazwę, typ aktywa, walutę instrumentu, `market_symbol` i preferencję providera.
+3. Sprawdź kompaktową gotowość instrumentu: provider chain, walutę wykresu, walutę wyceny portfela i gotowość backfillu.
+4. Opcjonalnie zaznacz `Pobierz historię cen po dodaniu` i wybierz zakres `1Y/3Y/5Y/MAX`.
+5. Gdy provider nie pobierze historii, aktywo nadal zostaje zapisane. Użyj korekty symbolu dostawcy albo CSV importu w `Intelligence -> Backfill`.
+
+Zaawansowane szczegóły providera są ukryte w sekcji `Zaawansowane szczegóły providera`. Ręczne dodawanie aktywów bez katalogu nadal działa dla prywatnych, niestandardowych albo manualnych pozycji.
+
+Wyszukiwarka katalogu działa lokalnie na aktywnych wpisach `instrument_catalog`. Dopasowuje `symbol`, `name`, `aliases`, `market_symbol`, `category`, `asset_type`, `exchange`, `country` oraz wyliczone kandydaty symboli providerów. Wyniki są sortowane tak, żeby dokładny symbol i alias były wyżej, a popularne benchmarki miały lekki priorytet. To nadal nie jest globalny top search ani live autocomplete z zewnętrznych API.
+
+Przypomnienie walut:
+
+- wykres instrumentu pokazuje cenę w walucie instrumentu, np. AAPL w USD, IUSQ.DE w EUR, GPW w PLN,
+- wycena portfela, snapshoty, P/L i performance pozostają w walucie bazowej portfolio,
+- jeśli FX nie istnieje w bezpiecznym oknie, źródłowy wykres nadal działa, ale przybliżona wycena bazowa jest niedostępna,
+- CSV/manual jest jawny fallback dla historii, której EODHD/Stooq/CoinGecko/CryptoCompare nie potrafią pobrać.
 
 Przykłady:
 

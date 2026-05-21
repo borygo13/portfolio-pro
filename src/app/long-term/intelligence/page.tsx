@@ -7,6 +7,7 @@ import { BenchmarkComparisonChart, BenchmarkRelativeChart, DrawdownCurveChart, M
 import { Card, PageHeader, Shell, StatCard, TrustBadge } from '@/components/Shell'
 import { projectEdoBond, summarizeEdoBonds } from '@/lib/bond-engine'
 import { PLN, PCT, formatCurrencyValue } from '@/lib/format'
+import { instrumentMeta, instrumentProviderCandidates, instrumentReadiness, searchInstrumentCatalogRows } from '@/lib/instruments/search'
 import {
   buildAllocationDrift,
   buildMonthlyDividendPoints,
@@ -219,39 +220,6 @@ function directionLabel(value: string) {
   if (value === 'buy') return 'Dokup'
   if (value === 'trim') return 'Redukuj'
   return 'Trzymaj'
-}
-
-function normalizeCatalogQuery(value: string) {
-  return value
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-}
-
-function filterCatalogPresets(rows: InstrumentCatalogRow[], query: string) {
-  const terms = normalizeCatalogQuery(query).split(/\s+/).filter(Boolean)
-  if (terms.length === 0) return rows.slice(0, 8)
-
-  return rows.filter((row) => {
-    const haystack = normalizeCatalogQuery([
-      row.name,
-      row.symbol,
-      row.market_symbol,
-      row.provider,
-      row.category,
-      row.currency,
-      row.exchange ?? '',
-      row.country ?? '',
-      ...(row.aliases ?? []),
-    ].join(' '))
-    return terms.every((term) => haystack.includes(term))
-  }).slice(0, 8)
-}
-
-function catalogMeta(row: InstrumentCatalogRow) {
-  const providerChain = providerStatusForAsset({ asset_type: row.asset_type, symbol: row.symbol, price_source: row.provider }).provider
-  return `${row.asset_type} · ${row.currency}${row.exchange ? ` · ${row.exchange}` : ''} · Provider chain: ${providerChain}`
 }
 
 function metricOrReason(value: number | null, reason: string | null | undefined) {
@@ -492,8 +460,8 @@ export default function PortfolioIntelligencePage() {
     ? { ...selectedBackfillAsset, market_symbol: marketSymbolDrafts[selectedBackfillAsset.id] || selectedBackfillAsset.market_symbol }
     : null, selectedProviderStatus.fallbackOrder), [selectedBackfillAsset, selectedProviderStatus, marketSymbolDrafts])
   const selectedBackfillSymbol = selectedSymbolResolution?.primarySymbol ?? '—'
-  const backfillCatalogResults = useMemo(() => filterCatalogPresets(instrumentCatalog, catalogQuery), [instrumentCatalog, catalogQuery])
-  const benchmarkCatalogResults = useMemo(() => filterCatalogPresets(benchmarkCatalog, benchmarkCatalogQuery), [benchmarkCatalog, benchmarkCatalogQuery])
+  const backfillCatalogResults = useMemo(() => searchInstrumentCatalogRows(instrumentCatalog, catalogQuery, { limit: 8 }), [instrumentCatalog, catalogQuery])
+  const benchmarkCatalogResults = useMemo(() => searchInstrumentCatalogRows(benchmarkCatalog, benchmarkCatalogQuery, { limit: 8 }), [benchmarkCatalog, benchmarkCatalogQuery])
   const selectedCsvImportAsset = marketAssets.find((asset) => asset.id === csvImportAssetId) ?? null
   const csvPreview = useMemo(() => parseHistoricalPriceCsv(csvText), [csvText])
   const latestSnapshotAllocation = snapshots[snapshots.length - 1]?.allocation_breakdown ?? []
@@ -592,7 +560,7 @@ export default function PortfolioIntelligencePage() {
       const updated = await applyInstrumentPresetToAsset(asset.id, preset.id)
       setAssets((current) => current.map((item) => item.id === updated.id ? updated : item))
       setMarketSymbolDrafts((current) => ({ ...current, [updated.id]: updated.market_symbol ?? '' }))
-      setPresetMessage(`Zastosowano preset ${preset.symbol} -> ${preset.market_symbol}.`)
+      setPresetMessage(`Zastosowano preset ${preset.symbol}. Aktywo jest gotowe do backfillu lub importu CSV.`)
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się zastosować presetu instrumentu.')
     } finally {
@@ -1036,8 +1004,8 @@ export default function PortfolioIntelligencePage() {
                 <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <p className="text-sm font-semibold text-white">Provider symbol</p>
-                      <p className="mt-1 text-xs text-slate-500">Używany do EODHD/Stooq/CoinGecko. Symbol użytkownika pozostaje bez zmian.</p>
+                      <p className="text-sm font-semibold text-white">Symbol do pobierania cen</p>
+                      <p className="mt-1 text-xs text-slate-500">Możesz zostawić preset albo skorygować symbol dla dostawcy danych. Symbol widoczny w portfelu pozostaje bez zmian.</p>
                     </div>
                     <span className="rounded-full bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-200">{selectedBackfillSymbol}</span>
                   </div>
@@ -1062,7 +1030,7 @@ export default function PortfolioIntelligencePage() {
                       <p className="text-sm font-semibold text-white">Preset z katalogu</p>
                     </div>
                     <Input
-                      placeholder="Szukaj: BTC, IUSQ, Nasdaq, Apple"
+                      placeholder="Szukaj: Apple, AAPL, Nasdaq, S&P 500, MSCI World, BTC"
                       value={catalogQuery}
                       onChange={setCatalogQuery}
                     />
@@ -1091,7 +1059,7 @@ export default function PortfolioIntelligencePage() {
               </SubmitButton>
             </form>
 
-            <p className="mt-4 text-xs leading-5 text-slate-500">Przykłady: IUSQ.DE zostanie przetłumaczone na EODHD IUSQ.XETRA i Stooq iusq.de; 500.PA może próbować 500.fr w Stooq; BTC zostaje CoinGecko bitcoin.</p>
+            <p className="mt-4 text-xs leading-5 text-slate-500">Szukaj naturalnie: Apple, AAPL, Nasdaq, S&P 500, MSCI World, BTC. Szczegóły symboli providerów są dostępne w diagnostyce.</p>
             </Card>
 
             <Card>
@@ -1432,10 +1400,16 @@ function CatalogPresetList({
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <p className="font-semibold text-white">{row.symbol}</p>
-              <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-xs font-semibold text-cyan-200">{row.market_symbol}</span>
+              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${instrumentReadiness(row).tone === 'emerald' ? 'bg-emerald-500/10 text-emerald-200' : 'bg-amber-500/10 text-amber-100'}`}>
+                {instrumentReadiness(row).badge}
+              </span>
             </div>
             <p className="mt-1 truncate text-sm text-slate-300">{row.name}</p>
-            <p className="mt-1 text-xs text-slate-500">{catalogMeta(row)}</p>
+            <p className="mt-1 text-xs text-slate-500">{instrumentMeta(row)} · Provider chain: {instrumentReadiness(row).providerChain}</p>
+            <details className="mt-2 text-xs text-slate-500">
+              <summary className="cursor-pointer text-slate-400">Zaawansowane szczegóły providera</summary>
+              <p className="mt-1 leading-5">Candidates: {instrumentProviderCandidates(row).slice(0, 6).map((candidate) => `${candidate.provider}:${candidate.symbol}`).join(' · ') || row.market_symbol}</p>
+            </details>
           </div>
           <button
             type="button"
