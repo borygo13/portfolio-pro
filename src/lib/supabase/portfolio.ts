@@ -1,4 +1,5 @@
 import type { User } from '@supabase/supabase-js'
+import { searchInstrumentCatalogRows } from '@/lib/instruments/search'
 import { FX_PREVIOUS_LOOKBACK_DAYS, fxAddDays, fxDaysBetween, normalizeCurrencyCode } from '@/lib/market/fx'
 import { supabase } from './client'
 import { ensureUserWorkspace } from './bootstrap'
@@ -55,38 +56,6 @@ export type InstrumentCatalogRow = {
 }
 
 const INSTRUMENT_CATALOG_SELECT = 'id,name,symbol,market_symbol,provider,category,asset_type,currency,exchange,country,aliases,benchmark_candidate,is_active,created_at,updated_at'
-
-function normalizeCatalogSearch(value: string) {
-  return value
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-}
-
-function catalogSearchText(item: InstrumentCatalogRow) {
-  return normalizeCatalogSearch([
-    item.name,
-    item.symbol,
-    item.market_symbol,
-    item.provider,
-    item.category,
-    item.asset_type,
-    item.currency,
-    item.exchange ?? '',
-    item.country ?? '',
-    ...(item.aliases ?? []),
-  ].join(' '))
-}
-
-function filterCatalogRows(rows: InstrumentCatalogRow[], query: string) {
-  const terms = normalizeCatalogSearch(query).split(/\s+/).filter(Boolean)
-  if (terms.length === 0) return rows
-  return rows.filter((row) => {
-    const haystack = catalogSearchText(row)
-    return terms.every((term) => haystack.includes(term))
-  })
-}
 
 export async function getDefaultPortfolio(user: User): Promise<Portfolio> {
   await ensureUserWorkspace(user)
@@ -986,7 +955,7 @@ export async function searchInstrumentCatalog(query: string, category?: string):
   const { data, error } = await request
   if (error) throw new Error(`Nie udało się wyszukać instrumentów: ${error.message}`)
 
-  return filterCatalogRows((data ?? []) as InstrumentCatalogRow[], query).slice(0, 50)
+  return searchInstrumentCatalogRows((data ?? []) as InstrumentCatalogRow[], query, { limit: 50 })
 }
 
 export async function listBenchmarkCandidates(): Promise<InstrumentCatalogRow[]> {
