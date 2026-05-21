@@ -271,7 +271,7 @@ Providerzy:
 - Crypto: CoinGecko market chart range API dla zakresu 1Y; dla dłuższych publicznych zakresów używany jest bezpłatny fallback CryptoCompare, zapisywany pod stabilnym źródłem crypto, żeby nie dublować dziennych rekordów.
 - ETF/akcje/indeksy: EODHD jest głównym providerem historycznym, a Stooq pozostaje fallbackiem. Backfill używa resolvera symboli providerów: z `assets.market_symbol` i `assets.symbol` buduje osobne kandydaty dla EODHD oraz Stooq zamiast zakładać, że jeden symbol pasuje do każdego źródła. Ustaw server-side `EODHD_API_KEY`. Jeśli EODHD nie ma klucza albo symbolu, raport per aktywo pokaże nieudane kandydaty, fallback do Stooq oraz sugestię CSV importu.
 - Stooq: fallback provider daily CSV. Jeśli Stooq wymaga klucza do CSV historycznego, ustaw server-side `STOOQ_API_KEY`.
-- FX: historyczne kursy NBP do PLN, zapisywane w `fx_rates`; jeśli kursu dla daty nie ma, `close_price_base` zostaje puste zamiast sztucznego przeliczenia.
+- FX: historyczne kursy NBP do PLN, zapisywane w `fx_rates`. Dokładny kurs z tej samej daty jest preferowany; jeśli go nie ma, backfill może użyć najnowszego wcześniejszego kursu z maksymalnie 7 dni. Jeśli taki kurs też nie istnieje, `close_price_base` zostaje puste zamiast sztucznego przeliczenia.
 
 Daily cron `/api/cron/prices` pozostaje mechanizmem przyszłych dziennych aktualizacji. Backfill uzupełnia przeszłość w `market_prices`, a cron dopisuje kolejne dni.
 
@@ -281,9 +281,9 @@ Daily cron `/api/cron/prices` pozostaje mechanizmem przyszłych dziennych aktual
 - `source_currency` is the currency of `close_price`, for example AAPL in USD, IUSQ.DE/500.PA in EUR, GPW assets in PLN, and crypto in the quote currency returned by the crypto provider.
 - `close_price_base` is the converted portfolio/base-currency value, currently usually PLN, and is used for portfolio valuation, allocation, P/L, contribution charts, snapshots and performance analytics.
 - Instrument-level asset charts default to source currency and never mix source prices with base-currency prices in one series.
-- When historical FX exists, instrument tooltips may show an approximate base value, for example `250 USD ≈ 1 000 PLN` with the historical FX rate for that date.
-- If FX is missing for a non-base asset, the app shows the source price only and reports that the PLN/base estimate is unavailable. It does not silently use FX = 1 for USD/EUR -> PLN.
-- Manual CSV import follows the same rule: source values fill `close_price`; base values are written only when the source currency equals the portfolio base currency or when a safe FX conversion exists.
+- When historical FX exists, instrument tooltips may show an approximate base value, for example `250 USD ≈ 1 000 PLN`. Same-day FX is preferred; weekend/holiday rows may use the latest previous NBP rate within the 7-day safety window.
+- If FX is missing for a non-base asset, the app shows the source price only and reports that the PLN/base estimate is unavailable. It does not silently use FX = 1 for USD/EUR/GBP/CHF -> PLN.
+- Manual CSV import follows the same rule: source values fill `close_price`; base values are written only when the source currency equals the portfolio base currency or when exact/previous FX is found safely.
 
 Examples:
 
@@ -291,6 +291,7 @@ Examples:
 - IUSQ.DE / 500.PA chart: EUR primary, approximate PLN secondary when FX exists.
 - GPW asset chart: PLN primary and portfolio value PLN.
 - BTC/crypto chart: provider quote currency as stored in `source_currency`; current public crypto backfill stores PLN quotes unless a future provider adds USD quotes.
+- Weekend/holiday example: AAPL source USD can use the previous available USD/PLN NBP rate for a Sunday price row; if no rate exists within 7 days, the USD chart still renders but the PLN estimate remains unavailable.
 
 ### Test backfillu w UI
 
@@ -315,7 +316,7 @@ npm run dev
 3. Wejdź do `Long-term -> Intelligence -> Backfill`.
 4. Dla ETF/akcji ustaw `market_symbol`, np. `IUSQ.DE`, `500.PA`, `CSPX.L`, `AAPL.US`. Resolver przetłumaczy go na provider-specific candidates, np. `IUSQ.DE` -> EODHD `IUSQ.XETRA` i Stooq `iusq.de`. Dla BTC możesz użyć CoinGecko ID `bitcoin`.
 5. Uruchom `Backfill selected asset` dla IUSQ.DE, 500.PA, CSPX.L oraz crypto BTC/BNB.
-6. Sprawdź raport per aktywo: provider, fallback chain, candidate symbols, wybrany `source_symbol`, zapisane wiersze, adjusted rows, braki FX i ewentualne pozostałe rows/assets.
+6. Sprawdź raport per aktywo: provider, fallback chain, candidate symbols, wybrany `source_symbol`, zapisane wiersze, adjusted rows, FX exact/fallback/missing i ewentualne pozostałe rows/assets.
 7. Wejdź na Dashboard i przełącz zakresy wykresów `30D/90D/1Y/3Y/5Y/MAX`.
 
 ### SQL verification

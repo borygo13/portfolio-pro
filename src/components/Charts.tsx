@@ -33,25 +33,79 @@ type ChartRange = '30D' | '90D' | '1Y' | '3Y' | '5Y' | 'MAX'
 
 function fullDateLabel(value: unknown) {
   if (typeof value !== 'string') return String(value ?? '')
-  const date = new Date(`${value}T00:00:00`)
+  const date = new Date(`${value}T00:00:00.000Z`)
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleDateString('pl-PL', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
 function axisDateLabel(value: unknown, range: ChartRange = 'MAX') {
   if (typeof value !== 'string') return String(value ?? '')
-  const date = new Date(`${value}T00:00:00`)
+  const date = new Date(`${value}T00:00:00.000Z`)
   if (Number.isNaN(date.getTime())) return value
   if (range === '30D' || range === '90D') return date.toLocaleDateString('pl-PL', { day: '2-digit', month: 'short' })
   if (range === '1Y') return date.toLocaleDateString('pl-PL', { month: 'short', year: '2-digit' })
   return date.toLocaleDateString('pl-PL', { year: 'numeric' })
 }
 
+function axisBucket(value: string, range: ChartRange) {
+  const date = new Date(`${value}T00:00:00.000Z`)
+  if (Number.isNaN(date.getTime())) return value
+  const year = date.getUTCFullYear()
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+  const day = date.getUTCDate()
+  if (range === '30D') return value
+  if (range === '90D') return `${year}-${month}-w${Math.floor((day - 1) / 7)}`
+  if (range === '1Y') return `${year}-${month}`
+  return String(year)
+}
+
+function axisMaxTicks(range: ChartRange) {
+  if (range === '30D') return 6
+  if (range === '90D') return 7
+  if (range === '1Y') return 8
+  if (range === '3Y') return 6
+  if (range === '5Y') return 7
+  return 8
+}
+
+function axisMinTickGap(range: ChartRange) {
+  if (range === '30D') return 42
+  if (range === '90D') return 52
+  if (range === '1Y') return 66
+  return 78
+}
+
+function axisDateTicks(data: { date?: string }[], range: ChartRange) {
+  const dates = data.map((item) => item.date).filter((date): date is string => Boolean(date)).sort()
+  if (dates.length <= 2) return dates
+
+  const byBucket = new Map<string, string>()
+  for (const date of dates) {
+    const bucket = axisBucket(date, range)
+    if (!byBucket.has(bucket)) byBucket.set(bucket, date)
+  }
+
+  const first = dates[0]
+  const last = dates[dates.length - 1]
+  const candidates = Array.from(new Set([first, ...byBucket.values(), last])).sort()
+  const maxTicks = axisMaxTicks(range)
+  if (candidates.length <= maxTicks) return candidates
+
+  const sampled = new Set<string>()
+  for (let index = 0; index < maxTicks; index += 1) {
+    const candidateIndex = Math.round(index * (candidates.length - 1) / (maxTicks - 1))
+    sampled.add(candidates[candidateIndex])
+  }
+  sampled.add(first)
+  sampled.add(last)
+  return Array.from(sampled).sort()
+}
+
 function dateSpanDays(data: { date?: string }[]) {
   const dates = data.map((item) => item.date).filter((date): date is string => Boolean(date)).sort()
   if (dates.length < 2) return 0
-  const first = new Date(`${dates[0]}T00:00:00`).getTime()
-  const last = new Date(`${dates[dates.length - 1]}T00:00:00`).getTime()
+  const first = new Date(`${dates[0]}T00:00:00.000Z`).getTime()
+  const last = new Date(`${dates[dates.length - 1]}T00:00:00.000Z`).getTime()
   if (!Number.isFinite(first) || !Number.isFinite(last)) return 0
   return Math.max(0, (last - first) / (24 * 60 * 60 * 1000))
 }
@@ -83,6 +137,7 @@ export function AllocationChart({ data, total }: { data: { name: string; value: 
 export function EquityChart({ data, range = 'MAX' }: { data: ({ date?: string; month?: string; portfolio: number; contribution: number; benchmark?: number })[]; range?: ChartRange }) {
   const chartData = data.map((item) => ({ ...item, date: item.date ?? item.month ?? '' }))
   const axisRange = effectiveAxisRange(chartData, range)
+  const axisTicks = axisDateTicks(chartData, axisRange)
 
   return (
     <ResponsiveContainer width="100%" height={310}>
@@ -94,7 +149,7 @@ export function EquityChart({ data, range = 'MAX' }: { data: ({ date?: string; m
           </linearGradient>
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
-        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#64748b" tickLine={false} axisLine={false} minTickGap={28} />
+        <XAxis dataKey="date" ticks={axisTicks} interval={0} tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#64748b" tickLine={false} axisLine={false} minTickGap={axisMinTickGap(axisRange)} />
         <YAxis stroke="#64748b" tickLine={false} axisLine={false} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
         <Tooltip formatter={(v) => PLN.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
         <Area type="monotone" dataKey="portfolio" name="Portfel" stroke="#8b5cf6" strokeWidth={3} fill="url(#portfolioGradient)" />
@@ -113,6 +168,8 @@ type AssetHistoryPoint = {
   basePrice?: number | null
   baseCurrency?: string | null
   fxRateToBase?: number | null
+  fxRateDate?: string | null
+  fxFallbackDays?: number | null
   fxMissing?: boolean
 }
 
@@ -123,8 +180,10 @@ function AssetHistoryTooltip({ active, payload, label }: { active?: boolean; pay
   const currency = point.currency ?? 'PLN'
   const baseCurrency = point.baseCurrency ?? 'PLN'
   const hasBaseEstimate = point.basePrice != null && Number.isFinite(point.basePrice) && point.basePrice > 0 && baseCurrency !== currency
+  const fxDate = point.fxRateDate ?? point.date ?? label
+  const fxFallback = point.fxFallbackDays != null && point.fxFallbackDays > 0
   const fxNote = hasBaseEstimate && point.fxRateToBase
-    ? `FX: 1 ${currency} ≈ ${point.fxRateToBase.toLocaleString('pl-PL', { maximumFractionDigits: 4 })} ${baseCurrency} on ${fullDateLabel(point.date ?? label)}`
+    ? `FX: 1 ${currency} ≈ ${point.fxRateToBase.toLocaleString('pl-PL', { maximumFractionDigits: 4 })} ${baseCurrency} on ${fullDateLabel(fxDate)}${fxFallback ? ' (previous available)' : ''}`
     : null
 
   return (
@@ -141,6 +200,7 @@ function AssetHistoryTooltip({ active, payload, label }: { active?: boolean; pay
 export function AssetHistoryChart({ data, range = 'MAX' }: { data: AssetHistoryPoint[]; range?: ChartRange }) {
   const chartData = data.map((item) => ({ ...item, date: item.date ?? item.label }))
   const axisRange = effectiveAxisRange(chartData, range)
+  const axisTicks = axisDateTicks(chartData, axisRange)
   const currency = chartData[0]?.currency ?? 'PLN'
 
   return (
@@ -153,7 +213,7 @@ export function AssetHistoryChart({ data, range = 'MAX' }: { data: AssetHistoryP
           </linearGradient>
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
-        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} />
+        <XAxis dataKey="date" ticks={axisTicks} interval={0} tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={axisMinTickGap(axisRange)} />
         <YAxis width={58} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => Math.round(Number(v)).toLocaleString('pl-PL')} />
         <Tooltip content={<AssetHistoryTooltip />} />
         <Area type="monotone" dataKey="price" name={`Cena ${currency}`} stroke="#06b6d4" strokeWidth={3} fill="url(#assetHistoryGradient)" />
@@ -194,12 +254,13 @@ export function MonthlyDividendChart({ data }: { data: { month: string; gross: n
 export function MonthlyReturnsChart({ data, range = 'MAX' }: { data: { date?: string; month: string; returnPct: number }[]; range?: ChartRange }) {
   const chartData = data.map((item) => ({ ...item, date: item.date ?? item.month }))
   const axisRange = effectiveAxisRange(chartData, range)
+  const axisTicks = axisDateTicks(chartData, axisRange)
 
   return (
     <ResponsiveContainer width="100%" height={250}>
       <BarChart data={chartData} margin={{ top: 10, right: 8, left: 0, bottom: 0 }} barCategoryGap="38%" maxBarSize={42}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.10)" />
-        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} />
+        <XAxis dataKey="date" ticks={axisTicks} interval={0} tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={axisMinTickGap(axisRange)} />
         <YAxis width={58} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => PCT.format(Number(v))} />
         <Tooltip formatter={(v) => PCT.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
         <Bar dataKey="returnPct" name="Zwrot m/m" radius={[8, 8, 0, 0]}>
@@ -213,12 +274,13 @@ export function MonthlyReturnsChart({ data, range = 'MAX' }: { data: { date?: st
 export function BenchmarkComparisonChart({ data, range = 'MAX' }: { data: { date?: string; month: string; portfolio: number; benchmark: number }[]; range?: ChartRange }) {
   const chartData = data.map((item) => ({ ...item, date: item.date ?? item.month }))
   const axisRange = effectiveAxisRange(chartData, range)
+  const axisTicks = axisDateTicks(chartData, axisRange)
 
   return (
     <ResponsiveContainer width="100%" height={280}>
       <LineChart data={chartData} margin={{ top: 12, right: 8, left: -15, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
-        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#64748b" tickLine={false} axisLine={false} />
+        <XAxis dataKey="date" ticks={axisTicks} interval={0} tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#64748b" tickLine={false} axisLine={false} minTickGap={axisMinTickGap(axisRange)} />
         <YAxis stroke="#64748b" tickLine={false} axisLine={false} tickFormatter={(v) => `${Math.round(Number(v))}`} />
         <Tooltip formatter={(v) => Number(v).toFixed(1)} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
         <Line type="monotone" dataKey="portfolio" name="Portfolio" stroke="#8b5cf6" strokeWidth={3} dot={false} />
@@ -230,12 +292,13 @@ export function BenchmarkComparisonChart({ data, range = 'MAX' }: { data: { date
 
 export function RollingReturnChart({ data, range = 'MAX' }: { data: { date: string; rollingReturnPct: number }[]; range?: ChartRange }) {
   const axisRange = effectiveAxisRange(data, range)
+  const axisTicks = axisDateTicks(data, axisRange)
 
   return (
     <ResponsiveContainer width="100%" height={250}>
       <LineChart data={data} margin={{ top: 12, right: 8, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
-        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={28} />
+        <XAxis dataKey="date" ticks={axisTicks} interval={0} tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={axisMinTickGap(axisRange)} />
         <YAxis width={58} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => PCT.format(Number(v))} />
         <Tooltip formatter={(v) => PCT.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
         <Line type="monotone" dataKey="rollingReturnPct" name="Rolling 12M" stroke="#22c55e" strokeWidth={3} dot={false} />
@@ -246,6 +309,7 @@ export function RollingReturnChart({ data, range = 'MAX' }: { data: { date: stri
 
 export function DrawdownCurveChart({ data, range = 'MAX' }: { data: { date: string; drawdownPct: number }[]; range?: ChartRange }) {
   const axisRange = effectiveAxisRange(data, range)
+  const axisTicks = axisDateTicks(data, axisRange)
 
   return (
     <ResponsiveContainer width="100%" height={250}>
@@ -257,7 +321,7 @@ export function DrawdownCurveChart({ data, range = 'MAX' }: { data: { date: stri
           </linearGradient>
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
-        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={28} />
+        <XAxis dataKey="date" ticks={axisTicks} interval={0} tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={axisMinTickGap(axisRange)} />
         <YAxis width={58} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => PCT.format(Number(v))} />
         <Tooltip formatter={(v) => PCT.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
         <Area type="monotone" dataKey="drawdownPct" name="Drawdown" stroke="#ef4444" strokeWidth={3} fill="url(#drawdownGradient)" />
@@ -268,12 +332,13 @@ export function DrawdownCurveChart({ data, range = 'MAX' }: { data: { date: stri
 
 export function BenchmarkRelativeChart({ data, range = 'MAX' }: { data: { date: string; relativeReturnPct: number }[]; range?: ChartRange }) {
   const axisRange = effectiveAxisRange(data, range)
+  const axisTicks = axisDateTicks(data, axisRange)
 
   return (
     <ResponsiveContainer width="100%" height={250}>
       <LineChart data={data} margin={{ top: 12, right: 8, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
-        <XAxis dataKey="date" tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={28} />
+        <XAxis dataKey="date" ticks={axisTicks} interval={0} tickFormatter={(value) => axisDateLabel(value, axisRange)} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={axisMinTickGap(axisRange)} />
         <YAxis width={58} stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => PCT.format(Number(v))} />
         <Tooltip formatter={(v) => PCT.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
         <Line type="monotone" dataKey="relativeReturnPct" name="Relative" stroke="#06b6d4" strokeWidth={3} dot={false} />

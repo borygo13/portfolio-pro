@@ -1,5 +1,6 @@
 import { buildAllocationBreakdown, isMarketPricedAsset, num, summarizeCashLedger, summarizeDividends } from '@/lib/portfolio-intelligence'
 import { buildPositions, portfolioSummary, type AssetPrice } from '@/lib/position-engine'
+import { FX_PREVIOUS_LOOKBACK_DAYS, fxDaysBetween } from '@/lib/market/fx'
 import type {
   Asset,
   CashLedgerEntry,
@@ -189,7 +190,11 @@ function closestFxRate(fxByPair: Map<string, FxRateRow[]>, fromCurrency: string,
     }
   }
 
-  return match ? num(match.rate) : null
+  if (!match) return null
+
+  const ageDays = fxDaysBetween(match.rate_date, date)
+  if (ageDays < 0 || ageDays > FX_PREVIOUS_LOOKBACK_DAYS) return null
+  return num(match.rate)
 }
 
 function basePrice(row: MarketPriceRow, baseCurrency: string, fxByPair: Map<string, FxRateRow[]>) {
