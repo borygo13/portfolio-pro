@@ -97,6 +97,8 @@ type BackfillResult = {
     persistedRows: number
     remainingRows: number
     fxMissingRows: number
+    fxFallbackRows?: number
+    maxFxFallbackDays?: number
     latestPriceDate: string | null
     error: string | null
     providerFallbackChain?: string[]
@@ -128,6 +130,11 @@ type PortfolioHistoryBackfillResult = {
 type CsvImportResult = {
   ok: boolean
   savedRows: number
+  fxExactRows?: number
+  fxFallbackRows?: number
+  fxMissingRows?: number
+  maxFxFallbackDays?: number
+  fxLookbackDays?: number
   source: CsvImportSourceLabel
   sourceCurrency: SupportedCashCurrency
   baseCurrency: SupportedCashCurrency
@@ -1296,7 +1303,9 @@ function MarketDataQualityPanel({ asset, provider, resolution, diagnostics, load
         <InfoLine label="Source price rows" value={diagnostics ? `${diagnostics.sourcePriceRows}/${diagnostics.rowCount}` : '—'} />
         <InfoLine label="Base price rows" value={diagnostics ? `${diagnostics.basePriceRows}/${diagnostics.rowCount}` : '—'} />
         <InfoLine label="Valuation-ready rows" value={diagnostics ? `${diagnostics.valuationReadyRows}/${diagnostics.rowCount}` : '—'} />
-        <InfoLine label="FX missing rows" value={diagnostics ? String(diagnostics.fxMissingRows) : '—'} />
+        <InfoLine label="FX exact rows" value={diagnostics ? String(diagnostics.fxExactRows) : '—'} />
+        <InfoLine label="FX fallback rows" value={diagnostics ? `${diagnostics.fxFallbackRows}${diagnostics.fxFallbackRows > 0 ? ` · max ${diagnostics.maxFxFallbackDays}d` : ''}` : '—'} />
+        <InfoLine label="FX missing rows" value={diagnostics ? `${diagnostics.fxMissingRows} · ${diagnostics.fxLookbackDays}d lookback` : '—'} />
         <InfoLine label="Date range" value={diagnostics?.minPriceDate && diagnostics.maxPriceDate ? `${formatDate(diagnostics.minPriceDate)} → ${formatDate(diagnostics.maxPriceDate)}` : '—'} />
         <InfoLine label="Coverage" value={diagnostics?.historyCoveragePct == null ? '—' : `${PCT.format(diagnostics.historyCoveragePct)} · ${diagnostics.expectedTradingDays} weekdays`} />
         <InfoLine label="Latest price" value={diagnostics?.latestPriceDate ? formatDate(diagnostics.latestPriceDate) : '—'} />
@@ -1470,11 +1479,12 @@ function BackfillResultPanel({ result, loading }: { result: BackfillResult | nul
               </div>
               <span className={`rounded-full px-3 py-1 text-xs font-semibold ${item.status === 'failed' ? 'bg-rose-500/10 text-rose-200' : item.status === 'partial' ? 'bg-amber-500/10 text-amber-100' : 'bg-emerald-500/10 text-emerald-200'}`}>{item.status}</span>
             </div>
-            <div className="mt-4 grid gap-3 text-sm md:grid-cols-5">
+            <div className="mt-4 grid gap-3 text-sm md:grid-cols-7">
               <InfoLine label="Fetched" value={String(item.fetchedRows)} />
               <InfoLine label="Saved" value={String(item.persistedRows)} />
               <InfoLine label="Older rows" value={String(item.remainingRows)} />
               <InfoLine label="FX missing" value={String(item.fxMissingRows)} />
+              <InfoLine label="FX fallback" value={`${item.fxFallbackRows ?? 0}${item.maxFxFallbackDays ? ` · max ${item.maxFxFallbackDays}d` : ''}`} />
               <InfoLine label="Adjusted rows" value={String(item.adjustedPriceRows ?? 0)} />
             </div>
             {item.providerMessages?.length ? <p className="mt-3 text-sm text-slate-400">{item.providerMessages.join(' ')}</p> : null}
@@ -1689,7 +1699,10 @@ function CsvImportPreviewPanel({ preview, result, loading }: { preview: CsvImpor
       {loading ? <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Import CSV w toku...</div> : null}
       {result ? (
         <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">
-          Zapisano/upsertowano {result.savedRows} wierszy dla źródła {result.source} · {result.sourceSymbol}.
+          <p>Zapisano/upsertowano {result.savedRows} wierszy dla źródła {result.source} · {result.sourceSymbol}.</p>
+          <p className="mt-1 text-xs text-emerald-100/80">
+            FX: exact {result.fxExactRows ?? 0} · previous {result.fxFallbackRows ?? 0}{result.maxFxFallbackDays ? ` (max ${result.maxFxFallbackDays}d)` : ''} · missing {result.fxMissingRows ?? 0}{result.fxLookbackDays ? ` within ${result.fxLookbackDays}d lookback` : ''}
+          </p>
         </div>
       ) : null}
 

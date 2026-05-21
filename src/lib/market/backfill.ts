@@ -1,5 +1,6 @@
 import { resolveCoinGeckoId } from '@/lib/market/providers/coingecko'
-import { getNbpHistoricalRatesToPln } from '@/lib/market/providers/nbp'
+import { FX_PREVIOUS_LOOKBACK_DAYS, fxDaysBetween } from '@/lib/market/fx'
+import { getNbpHistoricalRatesToPlnWithFallback } from '@/lib/market/providers/nbp'
 import { PROVIDER_CAPABILITIES, providerFallbackOrderForAsset, type MarketProviderId } from '@/lib/market/provider-diagnostics'
 import { getProviderSymbolCandidates, resolveProviderSymbol, type ProviderSymbolCandidate } from '@/lib/market/provider-symbols'
 import { getServerSupabase, type ServerSupabase } from '@/lib/market/persistence'
@@ -14,7 +15,6 @@ export const MAX_BACKFILL_ASSETS_PER_REQUEST = 5
 const SELECTED_ASSET_MAX_ROWS_PER_REQUEST = 5000
 const ALL_ACTIVE_MAX_ROWS_PER_ASSET = 2500
 const UPSERT_CHUNK_SIZE = 200
-const FX_RANGE_CHUNK_DAYS = 90
 const CRYPTOCOMPARE_CHUNK_LIMIT = 2000
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -68,6 +68,8 @@ export type BackfillAssetReport = {
   persistedRows: number
   remainingRows: number
   fxMissingRows: number
+  fxFallbackRows: number
+  maxFxFallbackDays: number
   latestPriceDate: string | null
   error: string | null
   providerFallbackChain: MarketProviderId[]
@@ -565,31 +567,10 @@ function latestRows(rows: RawHistoricalPricePoint[], maxRows: number) {
   }
 }
 
-function chunkDates(startDate: string, endDate: string) {
-  const chunks: { start: string; end: string }[] = []
-  let cursor = startDate
-  while (cursor <= endDate) {
-    const end = addDays(cursor, FX_RANGE_CHUNK_DAYS - 1)
-    chunks.push({ start: cursor, end: end < endDate ? end : endDate })
-    cursor = addDays(chunks[chunks.length - 1].end, 1)
-  }
-  return chunks
-}
-
 async function fetchFxMap(currency: string, dates: string[]) {
   const ccy = currency.toUpperCase()
-  const map = new Map<string, FxRateResult>()
-  if (ccy === 'PLN') return map
-
-  const uniqueDates = Array.from(new Set(dates)).sort()
-  if (uniqueDates.length === 0) return map
-
-  for (const chunk of chunkDates(uniqueDates[0], uniqueDates[uniqueDates.length - 1])) {
-    const rates = await getNbpHistoricalRatesToPln(ccy, chunk.start, chunk.end)
-    for (const rate of rates) map.set(rate.rateDate, rate)
-  }
-
-  return map
+  if (ccy === 'PLN') return new Map<string, FxRateResult>()
+  return getNbpHistoricalRatesToPlnWithFallback(ccy, dates, FX_PREVIOUS_LOOKBACK_DAYS)
 }
 
 async function applyHistoricalFx(rows: RawHistoricalPricePoint[]): Promise<HistoricalPricePoint[]> {
@@ -620,6 +601,22 @@ async function applyHistoricalFx(rows: RawHistoricalPricePoint[]): Promise<Histo
       fxRate: fx,
     }
   })
+}
+
+function fxFallbackStats(rows: HistoricalPricePoint[]) {
+  let fxFallbackRows = 0
+  let maxFxFallbackDays = 0
+
+  for (const row of rows) {
+    if (!row.fxRate || row.sourceCurrency === row.baseCurrency) continue
+    const ageDays = fxDaysBetween(row.fxRate.rateDate, row.priceDate)
+    if (ageDays > 0) {
+      fxFallbackRows += 1
+      maxFxFallbackDays = Math.max(maxFxFallbackDays, ageDays)
+    }
+  }
+
+  return { fxFallbackRows, maxFxFallbackDays }
 }
 
 function marketPricePayload(row: HistoricalPricePoint) {
@@ -736,6 +733,7 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
     const persistedRows = await persistBackfilledAsset(supabase, portfolioId, withFx)
     const latestPriceDate = withFx[withFx.length - 1]?.priceDate ?? null
     const fxMissingRows = withFx.filter((row) => row.sourceCurrency !== row.baseCurrency && row.closePriceBase == null).length
+    const { fxFallbackRows, maxFxFallbackDays } = fxFallbackStats(withFx)
     const provider = withFx[0]?.provider ?? (isCrypto(asset) ? 'coingecko' : 'stooq')
     const sourceSymbol = withFx[0]?.sourceSymbol ?? resolveProviderSymbol(asset, provider)
     const adjustedPriceRows = withFx.filter((row) => row.adjustedClosePrice !== row.closePrice).length
@@ -755,6 +753,8 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
       persistedRows,
       remainingRows,
       fxMissingRows,
+      fxFallbackRows,
+      maxFxFallbackDays,
       latestPriceDate,
       error,
       providerFallbackChain: fetched.providerFallbackChain,
@@ -778,6 +778,8 @@ async function backfillOneAsset(supabase: ServerSupabase, portfolioId: string, a
       persistedRows: 0,
       remainingRows: 0,
       fxMissingRows: 0,
+      fxFallbackRows: 0,
+      maxFxFallbackDays: 0,
       latestPriceDate: null,
       error,
       providerFallbackChain: fallbackChain,

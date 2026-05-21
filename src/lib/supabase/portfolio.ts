@@ -1,4 +1,5 @@
 import type { User } from '@supabase/supabase-js'
+import { FX_PREVIOUS_LOOKBACK_DAYS, fxAddDays, fxDaysBetween, normalizeCurrencyCode } from '@/lib/market/fx'
 import { supabase } from './client'
 import { ensureUserWorkspace } from './bootstrap'
 
@@ -298,6 +299,8 @@ export type MarketPriceHistoryPoint = {
   close_price: number
   close_price_base: number | null
   fx_rate_to_base: number | null
+  fx_rate_date?: string | null
+  fx_fallback_days?: number | null
   base_currency: string | null
   source_currency: string | null
   fetched_at: string
@@ -331,7 +334,11 @@ export type MarketPriceDiagnostics = {
   basePriceRows: number
   missingBasePriceRows: number
   valuationReadyRows: number
+  fxExactRows: number
+  fxFallbackRows: number
   fxMissingRows: number
+  maxFxFallbackDays: number
+  fxLookbackDays: number
   readyForPortfolioHistory: boolean
   quality: 'ready' | 'limited' | 'missing'
   warnings: string[]
@@ -403,6 +410,116 @@ function chartRangeLimit(range: ChartRange) {
   return 5000
 }
 
+type FxRateDiagnosticRow = {
+  from_currency: string | null
+  to_currency: string | null
+  rate_date: string
+  rate: number | null
+}
+
+type MarketFxLookupRow = {
+  price_date: string
+  source_currency: string | null
+  base_currency: string | null
+  fx_rate_to_base: number | null
+}
+
+function roughlySameRate(a: number, b: number) {
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return false
+  return Math.abs(a - b) / Math.max(a, b) < 0.0001
+}
+
+function groupFxDiagnosticRows(rows: FxRateDiagnosticRow[]) {
+  const grouped = new Map<string, FxRateDiagnosticRow[]>()
+  for (const row of rows) {
+    const from = normalizeCurrencyCode(row.from_currency)
+    const to = normalizeCurrencyCode(row.to_currency)
+    const current = grouped.get(`${from}:${to}`) ?? []
+    current.push({ ...row, from_currency: from, to_currency: to, rate_date: marketDateKey(row.rate_date) })
+    grouped.set(`${from}:${to}`, current)
+  }
+
+  for (const [key, values] of grouped.entries()) {
+    grouped.set(key, values.sort((a, b) => a.rate_date.localeCompare(b.rate_date)))
+  }
+
+  return grouped
+}
+
+function findFxMatch(
+  fxByPair: Map<string, FxRateDiagnosticRow[]>,
+  row: MarketFxLookupRow,
+) {
+  const fromCurrency = normalizeCurrencyCode(row.source_currency)
+  const toCurrency = normalizeCurrencyCode(row.base_currency)
+  if (fromCurrency === toCurrency) return null
+
+  const expectedRate = Number(row.fx_rate_to_base ?? 0)
+  if (!Number.isFinite(expectedRate) || expectedRate <= 0) return null
+
+  const priceDate = marketDateKey(row.price_date)
+  const rows = fxByPair.get(`${fromCurrency}:${toCurrency}`) ?? []
+  let left = 0
+  let right = rows.length - 1
+  let match: FxRateDiagnosticRow | null = null
+
+  while (left <= right) {
+    const middle = Math.floor((left + right) / 2)
+    const candidate = rows[middle]
+    if (candidate.rate_date <= priceDate) {
+      match = candidate
+      left = middle + 1
+    } else {
+      right = middle - 1
+    }
+  }
+
+  if (!match || !roughlySameRate(Number(match.rate ?? 0), expectedRate)) return null
+  const fallbackDays = fxDaysBetween(match.rate_date, priceDate)
+  if (fallbackDays < 0 || fallbackDays > FX_PREVIOUS_LOOKBACK_DAYS) return null
+
+  return { rateDate: match.rate_date, fallbackDays }
+}
+
+async function fetchFxDiagnosticRows(rows: MarketFxLookupRow[]) {
+  const dates = rows.map((row) => marketDateKey(row.price_date)).filter(Boolean).sort()
+  if (dates.length === 0) return []
+
+  const fromCurrencies = Array.from(new Set(rows
+    .map((row) => normalizeCurrencyCode(row.source_currency))
+    .filter((currency) => currency && currency !== 'PLN')))
+  const toCurrencies = Array.from(new Set(rows
+    .map((row) => normalizeCurrencyCode(row.base_currency))
+    .filter((currency) => currency)))
+
+  if (fromCurrencies.length === 0 || toCurrencies.length === 0) return []
+
+  const { data, error } = await supabase
+    .from('fx_rates')
+    .select('from_currency,to_currency,rate_date,rate')
+    .in('from_currency', fromCurrencies)
+    .in('to_currency', toCurrencies)
+    .gte('rate_date', fxAddDays(dates[0], -FX_PREVIOUS_LOOKBACK_DAYS))
+    .lte('rate_date', dates[dates.length - 1])
+    .order('rate_date', { ascending: true })
+    .limit(20000)
+
+  if (error) return []
+  return (data ?? []) as FxRateDiagnosticRow[]
+}
+
+async function annotateMarketHistoryFx(rows: MarketPriceHistoryPoint[]) {
+  const fxByPair = groupFxDiagnosticRows(await fetchFxDiagnosticRows(rows))
+  return rows.map((row) => {
+    const match = findFxMatch(fxByPair, row)
+    return {
+      ...row,
+      fx_rate_date: match?.rateDate ?? null,
+      fx_fallback_days: match?.fallbackDays ?? null,
+    }
+  })
+}
+
 export async function listMarketPriceHistory(portfolioId: string, assetId: string, range: ChartRange = '1Y'): Promise<MarketPriceHistoryPoint[]> {
   let query = supabase
     .from('market_prices')
@@ -418,7 +535,7 @@ export async function listMarketPriceHistory(portfolioId: string, assetId: strin
     .limit(chartRangeLimit(range))
 
   if (error) throw new Error(`Nie udało się pobrać historii cen aktywa: ${error.message}`)
-  return ((data ?? []) as MarketPriceHistoryPoint[]).slice().reverse()
+  return annotateMarketHistoryFx(((data ?? []) as MarketPriceHistoryPoint[]).slice().reverse())
 }
 
 export async function getMarketPriceDiagnostics(portfolioId: string, assetId: string): Promise<MarketPriceDiagnostics> {
@@ -444,6 +561,7 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
     fx_rate_to_base: number | null
     fetched_at: string | null
   }[]
+  const fxByPair = groupFxDiagnosticRows(await fetchFxDiagnosticRows(rows))
   const dates = rows.map((row) => marketDateKey(row.price_date)).filter(Boolean)
   const uniqueDates = Array.from(new Set(dates)).sort()
   const minPriceDate = uniqueDates[0] ?? null
@@ -473,7 +591,10 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
   let basePriceRows = 0
   let missingBasePriceRows = 0
   let valuationReadyRows = 0
+  let fxExactRows = 0
+  let fxFallbackRows = 0
   let fxMissingRows = 0
+  let maxFxFallbackDays = 0
   for (const row of rows) {
     const source = row.source || 'unknown'
     const sourceCurrency = (row.source_currency || 'unknown').toUpperCase()
@@ -486,7 +607,18 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
     if (Number(row.close_price_base ?? 0) > 0) basePriceRows += 1
     else missingBasePriceRows += 1
     if (Number(row.close_price_base ?? 0) > 0 || (sourceCurrency === baseCurrency && Number(row.close_price ?? 0) > 0)) valuationReadyRows += 1
-    if (sourceCurrency !== baseCurrency && Number(row.close_price ?? 0) > 0 && Number(row.close_price_base ?? 0) <= 0) fxMissingRows += 1
+    if (sourceCurrency !== baseCurrency && Number(row.close_price ?? 0) > 0) {
+      if (Number(row.close_price_base ?? 0) <= 0) {
+        fxMissingRows += 1
+      } else {
+        const match = findFxMatch(fxByPair, row)
+        if (match?.fallbackDays === 0) fxExactRows += 1
+        if (match && match.fallbackDays > 0) {
+          fxFallbackRows += 1
+          maxFxFallbackDays = Math.max(maxFxFallbackDays, match.fallbackDays)
+        }
+      }
+    }
   }
 
   const sourceDistribution = Array.from(sourceCounts.entries())
@@ -509,7 +641,8 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
   if (recentGapCount > 0) warnings.push(`${recentGapCount} recent history gap(s) exceed 4 calendar days.`)
   if (historyCoveragePct != null && historyCoveragePct < 0.7) warnings.push(`History coverage is about ${Math.round(historyCoveragePct * 100)}% of expected weekdays.`)
   if (rows.length > 0 && missingBasePriceRows / rows.length > 0.5) warnings.push('Most rows do not have close_price_base; portfolio valuation needs FX coverage.')
-  if (fxMissingRows > 0) warnings.push(`${fxMissingRows} row(s) have source prices but no base-currency FX conversion.`)
+  if (fxFallbackRows > 0 && maxFxFallbackDays > 3) warnings.push(`${fxFallbackRows} row(s) use previous available FX; max fallback age is ${maxFxFallbackDays} day(s).`)
+  if (fxMissingRows > 0) warnings.push(`${fxMissingRows} row(s) still miss base-currency conversion because no FX was found within ${FX_PREVIOUS_LOOKBACK_DAYS} day(s).`)
   if (rows.length > 0 && valuationReadyRows < 2) warnings.push('Portfolio valuation is not ready because fewer than two rows have safe base-currency values.')
 
   const quality: MarketPriceDiagnostics['quality'] = rows.length === 0
@@ -541,7 +674,11 @@ export async function getMarketPriceDiagnostics(portfolioId: string, assetId: st
     basePriceRows,
     missingBasePriceRows,
     valuationReadyRows,
+    fxExactRows,
+    fxFallbackRows,
     fxMissingRows,
+    maxFxFallbackDays,
+    fxLookbackDays: FX_PREVIOUS_LOOKBACK_DAYS,
     readyForPortfolioHistory: valuationReadyRows >= 2 && quality !== 'missing',
     quality,
     warnings,

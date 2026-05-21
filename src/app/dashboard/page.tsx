@@ -6,6 +6,7 @@ import { Shell, PageHeader, Card, StatCard, TrustBadge, PillButton } from '@/com
 import { AllocationChart, AssetHistoryChart, DividendChart, EquityChart } from '@/components/Charts'
 import { dividends, tradingStats } from '@/lib/demo-data'
 import { PLN, PCT } from '@/lib/format'
+import { FX_PREVIOUS_LOOKBACK_DAYS } from '@/lib/market/fx'
 import { supabase } from '@/lib/supabase/client'
 import {
   getLatestPriceRefreshRun,
@@ -235,13 +236,15 @@ function buildAssetHistoryCurve(history: MarketPriceHistoryPoint[], asset: Asset
       basePrice: hasBaseEstimate ? basePrice : null,
       baseCurrency: pointBaseCurrency,
       fxRateToBase: n(point.fx_rate_to_base) || (hasBaseEstimate ? basePrice / price : null),
+      fxRateDate: point.fx_rate_date ?? null,
+      fxFallbackDays: point.fx_fallback_days ?? null,
       fxMissing: sourceCurrency !== pointBaseCurrency && !hasBaseEstimate,
     }]
   })
 
   const warnings: string[] = []
   if (skippedCurrencyRows > 0) warnings.push(`${skippedCurrencyRows} row(s) skipped because source currency differs from ${displayCurrency}.`)
-  if (fxMissingRows > 0) warnings.push(`${fxMissingRows} row(s) have source prices but no ${baseCurrency} estimate because FX is missing.`)
+  if (fxMissingRows > 0) warnings.push(`${fxMissingRows} row(s) still miss ${baseCurrency} estimate because no FX was found within ${FX_PREVIOUS_LOOKBACK_DAYS} day(s).`)
 
   return { points, displayCurrency, baseCurrency, skippedCurrencyRows, baseEstimateRows, fxMissingRows, warnings }
 }
