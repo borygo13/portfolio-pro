@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ArrowDownRight, ArrowUpRight, CalendarDays, Database, Loader2, Plus, RefreshCw, Trash2, Wallet } from 'lucide-react'
 import { Shell, PageHeader, Card, StatCard, TrustBadge } from '@/components/Shell'
-import { PLN } from '@/lib/format'
+import { BASE_CURRENCY, normalizeCurrencyCode } from '@/lib/currency'
+import { formatCurrencyValue, PLN } from '@/lib/format'
+import { buildPositions } from '@/lib/position-engine'
 import { supabase } from '@/lib/supabase/client'
 import {
   createTransaction,
@@ -16,16 +18,25 @@ import {
   type Transaction,
   type TransactionType,
 } from '@/lib/supabase/portfolio'
+import {
+  calculateTransactionAmounts,
+  transactionFeeBase,
+  transactionFeesSource,
+  transactionGrossSource,
+  transactionHasBaseValuation,
+  transactionNetBase,
+  transactionNetBaseOrNull,
+  transactionPriceSource,
+  transactionSourceCurrency,
+} from '@/lib/transaction-math'
 
-type PositionRow = {
-  assetId: string
-  symbol: string
-  name: string
-  type: string
-  currency: string
-  quantity: number
-  cost: number
-  avgPrice: number
+type FxPreview = {
+  status: 'idle' | 'loading' | 'ready' | 'missing' | 'error'
+  rate: number | null
+  rateDate: string | null
+  source: string | null
+  fallbackDays: number | null
+  message: string | null
 }
 
 function toNumber(value: string) {
@@ -49,6 +60,10 @@ function formatQuantity(value: number) {
   return value.toFixed(6).replace(/0+$/, '').replace(/\.$/, '')
 }
 
+function emptyFx(status: FxPreview['status'] = 'idle'): FxPreview {
+  return { status, rate: null, rateDate: null, source: null, fallbackDays: null, message: null }
+}
+
 export default function TransactionsPage() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
   const [assets, setAssets] = useState<Asset[]>([])
@@ -65,6 +80,7 @@ export default function TransactionsPage() {
   const [fees, setFees] = useState('0')
   const [date, setDate] = useState(today())
   const [notes, setNotes] = useState('')
+  const [fxPreview, setFxPreview] = useState<FxPreview>(emptyFx())
 
   async function loadData() {
     setLoading(true)
@@ -92,62 +108,105 @@ export default function TransactionsPage() {
 
   useEffect(() => { loadData() }, [])
 
-  const positions = useMemo<PositionRow[]>(() => {
-    const map = new Map<string, PositionRow>()
-    const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
+  const selectedAsset = assets.find((asset) => asset.id === assetId) ?? null
+  const baseCurrency = BASE_CURRENCY
+  const sourceCurrency = normalizeCurrencyCode(selectedAsset?.currency, baseCurrency)
 
-    for (const tx of [...transactions].reverse()) {
-      const asset = assetMap.get(tx.asset_id)
-      if (!asset) continue
+  useEffect(() => {
+    let cancelled = false
 
-      const current = map.get(tx.asset_id) ?? {
-        assetId: tx.asset_id,
-        symbol: asset.symbol,
-        name: asset.name,
-        type: asset.asset_type,
-        currency: asset.currency ?? 'PLN',
-        quantity: 0,
-        cost: 0,
-        avgPrice: 0,
+    async function loadFx() {
+      if (!date || !sourceCurrency) {
+        setFxPreview(emptyFx())
+        return
       }
 
-      const qty = Number(tx.quantity)
-      const gross = Number(tx.quantity) * Number(tx.price)
-      const txFees = Number(tx.fees ?? 0)
+      if (sourceCurrency === baseCurrency) {
+        setFxPreview({
+          status: 'ready',
+          rate: 1,
+          rateDate: date,
+          source: baseCurrency,
+          fallbackDays: 0,
+          message: null,
+        })
+        return
+      }
 
-      if (tx.transaction_type === 'BUY') {
-        current.quantity += qty
-        current.cost += gross + txFees
-      } else {
-        const avg = current.quantity > 0 ? current.cost / current.quantity : 0
-        current.quantity -= qty
-        current.cost -= avg * qty
-        if (current.quantity < 0.00000001) {
-          current.quantity = 0
-          current.cost = 0
+      setFxPreview(emptyFx('loading'))
+      try {
+        const params = new URLSearchParams({ currency: sourceCurrency, date })
+        const response = await fetch(`/api/fx/transaction-rate?${params.toString()}`)
+        const payload = await response.json()
+        if (cancelled) return
+
+        if (payload?.ok && payload?.rate) {
+          setFxPreview({
+            status: 'ready',
+            rate: Number(payload.rate),
+            rateDate: payload.rateDate ?? null,
+            source: payload.source ?? null,
+            fallbackDays: payload.fallbackDays ?? 0,
+            message: null,
+          })
+        } else {
+          setFxPreview({
+            status: payload?.error === 'FX_MISSING' ? 'missing' : 'error',
+            rate: null,
+            rateDate: null,
+            source: null,
+            fallbackDays: null,
+            message: payload?.message ?? 'Nie udało się pobrać kursu FX.',
+          })
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setFxPreview({ ...emptyFx('error'), message: err?.message ?? 'Nie udało się pobrać kursu FX.' })
         }
       }
-
-      current.avgPrice = current.quantity > 0 ? current.cost / current.quantity : 0
-      map.set(tx.asset_id, current)
     }
 
-    return Array.from(map.values()).filter((row) => row.quantity > 0)
-  }, [assets, transactions])
+    loadFx()
+    return () => { cancelled = true }
+  }, [baseCurrency, date, sourceCurrency])
 
-  const selectedAsset = assets.find((asset) => asset.id === assetId) ?? null
+  const positions = useMemo(() => buildPositions(assets, transactions, []).filter((row) => row.quantity > 0.00000001), [assets, transactions])
   const selectedAssetQuantity = useMemo(() => getAssetQuantity(assetId, transactions), [assetId, transactions])
+  const missingBaseTransactions = transactions.filter((tx) => !transactionHasBaseValuation(tx)).length
 
   const totalBuyValue = transactions
     .filter((tx) => tx.transaction_type === 'BUY')
-    .reduce((sum, tx) => sum + Number(tx.quantity) * Number(tx.price) + Number(tx.fees ?? 0), 0)
+    .reduce((sum, tx) => sum + transactionNetBase(tx), 0)
 
   const totalSellValue = transactions
     .filter((tx) => tx.transaction_type === 'SELL')
-    .reduce((sum, tx) => sum + Number(tx.quantity) * Number(tx.price) - Number(tx.fees ?? 0), 0)
+    .reduce((sum, tx) => sum + transactionNetBase(tx), 0)
 
-  const totalFees = transactions.reduce((sum, tx) => sum + Number(tx.fees ?? 0), 0)
-  const openCost = positions.reduce((sum, pos) => sum + pos.cost, 0)
+  const totalFees = transactions.reduce((sum, tx) => sum + transactionFeeBase(tx), 0)
+  const openCost = positions.reduce((sum, pos) => sum + pos.remainingCost, 0)
+
+  const preview = useMemo(() => {
+    if (!quantity && !price) return { result: null, error: null }
+    try {
+      return {
+        result: calculateTransactionAmounts({
+          transactionType: type,
+          quantity: toNumber(quantity || '0'),
+          priceSource: toNumber(price || '0'),
+          feesSource: toNumber(fees || '0'),
+          sourceCurrency,
+          fxRateToBase: fxPreview.rate,
+          baseCurrency,
+          fxRateDate: fxPreview.rateDate,
+          fxRateSource: fxPreview.source,
+        }),
+        error: null,
+      }
+    } catch (err: any) {
+      return { result: null, error: err?.message ?? 'Nie udało się policzyć transakcji.' }
+    }
+  }, [baseCurrency, fees, fxPreview.rate, fxPreview.rateDate, fxPreview.source, price, quantity, sourceCurrency, type])
+  const fxLoading = sourceCurrency !== baseCurrency && fxPreview.status === 'loading'
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -157,16 +216,12 @@ export default function TransactionsPage() {
     setSuccess(null)
 
     try {
-      const q = toNumber(quantity)
-      const p = toNumber(price)
-      const f = toNumber(fees || '0')
-
       if (!assetId) throw new Error('Wybierz aktywo.')
-      if (!q || q <= 0 || Number.isNaN(q)) throw new Error('Liczba jednostek musi być większa od zera.')
-      if (!p || p <= 0 || Number.isNaN(p)) throw new Error('Cena musi być większa od zera.')
-      if (Number.isNaN(f) || f < 0) throw new Error('Opłaty nie mogą być ujemne.')
       if (!date) throw new Error('Podaj datę transakcji.')
+      if (fxLoading) throw new Error('Poczekaj na sprawdzenie kursu FX.')
+      if (!preview.result) throw new Error(preview.error ?? 'Uzupełnij poprawne wartości transakcji.')
 
+      const q = preview.result.quantity
       if (type === 'SELL') {
         const availableQuantity = getAssetQuantity(assetId, transactions)
         if (availableQuantity <= 0) {
@@ -180,9 +235,20 @@ export default function TransactionsPage() {
       const created = await createTransaction(portfolio.id, {
         asset_id: assetId,
         transaction_type: type,
-        quantity: q,
-        price: p,
-        fees: f,
+        quantity: preview.result.quantity,
+        price: preview.result.priceBase ?? preview.result.priceSource,
+        fees: preview.result.feesBase ?? preview.result.feesSource,
+        source_currency: preview.result.sourceCurrency,
+        price_source: preview.result.priceSource,
+        fees_source: preview.result.feesSource,
+        fx_rate_to_base: preview.result.fxRateToBase,
+        base_currency: preview.result.baseCurrency,
+        price_base: preview.result.priceBase,
+        fees_base: preview.result.feesBase,
+        gross_amount_source: preview.result.grossAmountSource,
+        gross_amount_base: preview.result.grossAmountBase,
+        fx_rate_date: preview.result.fxRateDate,
+        fx_rate_source: preview.result.fxRateSource,
         transaction_date: date,
         notes,
       })
@@ -193,7 +259,9 @@ export default function TransactionsPage() {
       setFees('0')
       setNotes('')
       setDate(today())
-      setSuccess('Transakcja zapisana w Supabase.')
+      setSuccess(preview.result.baseConversionAvailable
+        ? 'Transakcja zapisana z wyceną w PLN.'
+        : 'Transakcja zapisana w walucie instrumentu. Wycena PLN będzie ograniczona do czasu uzupełnienia FX.')
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się dodać transakcji.')
     } finally {
@@ -216,15 +284,15 @@ export default function TransactionsPage() {
   return (
     <Shell>
       <PageHeader
-        eyebrow="Stage C2.1 · Transactions Fix"
+        eyebrow="Stage C5.8 · Multi-currency"
         title="Transakcje long-term"
-        description="Transakcje są częścią modułu Long-term. Sprzedaż ma walidację ilości, więc nie da się sprzedać więcej niż posiadasz."
+        description="Cena i prowizja są wpisywane w walucie instrumentu. Portfel, P/L i snapshoty pozostają w walucie bazowej."
       />
 
       <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
         <StatCard icon={Database} label="Liczba transakcji" value={String(transactions.length)} sub="zapisane w Supabase" tone="cyan" />
-        <StatCard icon={ArrowUpRight} label="Zakupy brutto" value={PLN.format(totalBuyValue)} sub="quantity × price + fees" tone="emerald" />
-        <StatCard icon={ArrowDownRight} label="Sprzedaż netto" value={PLN.format(totalSellValue)} sub="sell value - fees" tone="violet" />
+        <StatCard icon={ArrowUpRight} label="Zakupy" value={PLN.format(totalBuyValue)} sub={missingBaseTransactions ? `${missingBaseTransactions} bez wyceny PLN` : 'w walucie portfela'} tone="emerald" />
+        <StatCard icon={ArrowDownRight} label="Sprzedaż" value={PLN.format(totalSellValue)} sub="w walucie portfela" tone="violet" />
         <StatCard icon={Wallet} label="Koszt pozycji" value={PLN.format(openCost)} sub={`opłaty: ${PLN.format(totalFees)}`} />
       </div>
 
@@ -233,9 +301,9 @@ export default function TransactionsPage() {
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
               <h3 className="text-lg font-bold text-white">Dodaj transakcję</h3>
-              <p className="mt-1 text-sm text-slate-500">Na start ręczne BUY/SELL. Później podepniemy import IBKR.</p>
+              <p className="mt-1 text-sm text-slate-500">Dla AAPL wpisz USD, dla IUSQ EUR, dla GPW PLN. Kurs FX jest tylko do wyceny portfela.</p>
             </div>
-            <TrustBadge>Live DB</TrustBadge>
+            <TrustBadge>{baseCurrency}</TrustBadge>
           </div>
 
           {assets.length === 0 ? (
@@ -267,6 +335,28 @@ export default function TransactionsPage() {
                 </label>
               </div>
 
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-300">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span>Waluta instrumentu: <strong className="text-white">{sourceCurrency}</strong></span>
+                  <span>Waluta portfela: <strong className="text-white">{baseCurrency}</strong></span>
+                </div>
+                {sourceCurrency !== baseCurrency ? (
+                  <div className="mt-3 text-xs leading-5 text-slate-400">
+                    {fxPreview.status === 'loading' ? 'Pobieram kurs FX...' : null}
+                    {fxPreview.status === 'ready' && fxPreview.rate ? (
+                      <>
+                        Kurs FX: 1 {sourceCurrency} ≈ {fxPreview.rate.toLocaleString('pl-PL', { maximumFractionDigits: 4 })} {baseCurrency}
+                        {fxPreview.rateDate ? ` · kurs z ${fxPreview.rateDate}` : null}
+                        {fxPreview.fallbackDays && fxPreview.fallbackDays > 0 ? ' · ostatni dostępny kurs' : null}
+                      </>
+                    ) : null}
+                    {fxPreview.status === 'missing' || fxPreview.status === 'error' ? (
+                      <span className="text-amber-100">{fxPreview.message ?? 'Brak kursu dla tej daty.'} Transakcja zostanie zapisana w walucie instrumentu, ale wycena PLN będzie ograniczona.</span>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+
               {type === 'SELL' ? (
                 <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-300">
                   Dostępne do sprzedaży: <span className="font-bold text-white">{formatQuantity(selectedAssetQuantity)}</span>
@@ -280,13 +370,32 @@ export default function TransactionsPage() {
                   <input value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="np. 1,25" inputMode="decimal" className="input" />
                 </label>
                 <label className="block">
-                  <span className="mb-2 block text-sm font-semibold text-slate-300">Cena</span>
-                  <input value={price} onChange={(e) => setPrice(e.target.value)} placeholder="np. 386,54" inputMode="decimal" className="input" />
+                  <span className="mb-2 block text-sm font-semibold text-slate-300">Cena w walucie instrumentu ({sourceCurrency})</span>
+                  <input value={price} onChange={(e) => setPrice(e.target.value)} placeholder={sourceCurrency === 'PLN' ? 'np. 250,00' : 'np. 102,50'} inputMode="decimal" className="input" />
                 </label>
                 <label className="block">
-                  <span className="mb-2 block text-sm font-semibold text-slate-300">Opłaty</span>
+                  <span className="mb-2 block text-sm font-semibold text-slate-300">Prowizja ({sourceCurrency})</span>
                   <input value={fees} onChange={(e) => setFees(e.target.value)} placeholder="0" inputMode="decimal" className="input" />
                 </label>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm">
+                {preview.result ? (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div>
+                      <span className="text-slate-500">Wartość w walucie instrumentu</span>
+                      <p className="font-semibold text-white">{formatCurrencyValue(preview.result.grossAmountSource, sourceCurrency, 2)}</p>
+                    </div>
+                    <div>
+                      <span className="text-slate-500">Szacunkowo w {baseCurrency}</span>
+                      <p className="font-semibold text-white">
+                        {fxLoading ? 'pobieram kurs FX...' : preview.result.netAmountBase == null ? 'brak kursu FX' : formatCurrencyValue(preview.result.netAmountBase, baseCurrency, 2)}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <p className={preview.error ? 'text-amber-100' : 'text-slate-500'}>{preview.error ?? 'Wpisz ilość i cenę, aby zobaczyć podgląd.'}</p>
+                )}
               </div>
 
               <label className="block">
@@ -297,7 +406,7 @@ export default function TransactionsPage() {
               {error ? <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
               {success ? <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">{success}</div> : null}
 
-              <button disabled={saving} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-violet-500 px-5 py-4 text-sm font-bold text-white shadow-lg shadow-violet-950/40 transition hover:bg-violet-400 disabled:cursor-not-allowed disabled:opacity-60">
+              <button disabled={saving || !preview.result || fxLoading} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-violet-500 px-5 py-4 text-sm font-bold text-white shadow-lg shadow-violet-950/40 transition hover:bg-violet-400 disabled:cursor-not-allowed disabled:opacity-60">
                 {saving ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
                 Zapisz transakcję
               </button>
@@ -309,7 +418,7 @@ export default function TransactionsPage() {
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
               <h3 className="text-lg font-bold text-white">Pozycje z transakcji</h3>
-              <p className="mt-1 text-sm text-slate-500">Liczymy quantity, koszt oraz średnią cenę z BUY/SELL.</p>
+              <p className="mt-1 text-sm text-slate-500">Ilość zostaje w jednostkach, koszt i średnia cena są w walucie portfela.</p>
             </div>
             <button onClick={loadData} className="rounded-2xl p-3 text-slate-400 transition hover:bg-white/10 hover:text-white" title="Odśwież">
               <RefreshCw size={18} />
@@ -334,12 +443,12 @@ export default function TransactionsPage() {
                 </thead>
                 <tbody>
                   {positions.map((pos) => (
-                    <tr key={pos.assetId} className="border-t border-white/10 transition hover:bg-white/[0.03]">
-                      <td className="p-4"><p className="font-semibold text-white">{pos.symbol}</p><p className="text-xs text-slate-500">{pos.name}</p></td>
+                    <tr key={pos.asset.id} className="border-t border-white/10 transition hover:bg-white/[0.03]">
+                      <td className="p-4"><p className="font-semibold text-white">{pos.asset.symbol}</p><p className="text-xs text-slate-500">{pos.asset.name}</p></td>
                       <td className="p-4 text-right text-slate-300">{formatQuantity(pos.quantity)}</td>
-                      <td className="p-4 text-right text-white">{PLN.format(pos.cost)}</td>
-                      <td className="p-4 text-right text-slate-300">{pos.avgPrice.toFixed(2)}</td>
-                      <td className="p-4 text-right text-slate-500">{pos.currency}</td>
+                      <td className="p-4 text-right text-white">{formatCurrencyValue(pos.remainingCost, baseCurrency, 2)}</td>
+                      <td className="p-4 text-right text-slate-300">{formatCurrencyValue(pos.avgPrice, baseCurrency, 2)}</td>
+                      <td className="p-4 text-right text-slate-500">{pos.asset.currency ?? baseCurrency}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -353,7 +462,7 @@ export default function TransactionsPage() {
         <div className="mb-5 flex items-start justify-between gap-4">
           <div>
             <h3 className="text-lg font-bold text-white">Historia transakcji</h3>
-            <p className="mt-1 text-sm text-slate-500">Pełny dziennik operacji long-term.</p>
+            <p className="mt-1 text-sm text-slate-500">Cena źródłowa jest główna, wycena PLN jest pokazywana tylko gdy jest bezpieczny kurs FX.</p>
           </div>
           <TrustBadge>{portfolio?.name ?? 'Portfolio'}</TrustBadge>
         </div>
@@ -363,8 +472,8 @@ export default function TransactionsPage() {
         ) : transactions.length === 0 ? (
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 text-sm text-slate-400">Nie masz jeszcze żadnych transakcji.</div>
         ) : (
-          <div className="overflow-hidden rounded-3xl border border-white/10">
-            <table className="w-full text-sm">
+          <div className="overflow-x-auto rounded-3xl border border-white/10">
+            <table className="w-full min-w-[980px] text-sm">
               <thead className="bg-white/[0.04] text-left text-xs uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="p-4">Data</th>
@@ -372,23 +481,37 @@ export default function TransactionsPage() {
                   <th className="p-4">Typ</th>
                   <th className="p-4 text-right">Ilość</th>
                   <th className="p-4 text-right">Cena</th>
-                  <th className="p-4 text-right">Opłaty</th>
+                  <th className="p-4 text-right">Prowizja</th>
                   <th className="p-4 text-right">Wartość</th>
+                  <th className="p-4 text-right">Kurs FX</th>
                   <th className="p-4 text-right"></th>
                 </tr>
               </thead>
               <tbody>
                 {transactions.map((tx) => {
-                  const value = tx.transaction_type === 'BUY' ? Number(tx.quantity) * Number(tx.price) + Number(tx.fees ?? 0) : Number(tx.quantity) * Number(tx.price) - Number(tx.fees ?? 0)
+                  const txCurrency = transactionSourceCurrency(tx)
+                  const netBase = transactionNetBaseOrNull(tx)
+                  const fxRate = tx.fx_rate_to_base ? Number(tx.fx_rate_to_base) : null
                   return (
                     <tr key={tx.id} className="border-t border-white/10 transition hover:bg-white/[0.03]">
                       <td className="p-4 text-slate-400"><CalendarDays className="mr-2 inline" size={14} />{tx.transaction_date}</td>
                       <td className="p-4"><p className="font-semibold text-white">{tx.assets?.symbol ?? 'Aktywo'}</p><p className="text-xs text-slate-500">{tx.assets?.name ?? tx.asset_id}</p></td>
                       <td className="p-4"><span className={`rounded-full px-3 py-1 text-xs font-bold ${tx.transaction_type === 'BUY' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-rose-500/10 text-rose-300'}`}>{tx.transaction_type}</span></td>
                       <td className="p-4 text-right text-slate-300">{formatQuantity(Number(tx.quantity))}</td>
-                      <td className="p-4 text-right text-slate-300">{Number(tx.price).toFixed(2)}</td>
-                      <td className="p-4 text-right text-slate-500">{PLN.format(Number(tx.fees ?? 0))}</td>
-                      <td className="p-4 text-right text-white">{PLN.format(value)}</td>
+                      <td className="p-4 text-right text-slate-300">{formatCurrencyValue(transactionPriceSource(tx), txCurrency, 2)}</td>
+                      <td className="p-4 text-right text-slate-500">{formatCurrencyValue(transactionFeesSource(tx), txCurrency, 2)}</td>
+                      <td className="p-4 text-right">
+                        <p className="font-semibold text-white">{formatCurrencyValue(transactionGrossSource(tx), txCurrency, 2)}</p>
+                        <p className="text-xs text-slate-500">{netBase == null ? `brak ${baseCurrency}` : `≈ ${formatCurrencyValue(netBase, baseCurrency, 2)}`}</p>
+                      </td>
+                      <td className="p-4 text-right text-slate-500">
+                        {txCurrency === baseCurrency ? '—' : fxRate ? (
+                          <>
+                            <p>{fxRate.toFixed(4)}</p>
+                            {tx.fx_rate_date ? <p className="text-xs text-slate-600">{tx.fx_rate_date}</p> : null}
+                          </>
+                        ) : 'brak'}
+                      </td>
                       <td className="p-4 text-right">
                         <button onClick={() => handleDelete(tx.id)} className="rounded-xl p-2 text-slate-500 transition hover:bg-rose-500/10 hover:text-rose-300" title="Usuń transakcję">
                           <Trash2 size={16} />

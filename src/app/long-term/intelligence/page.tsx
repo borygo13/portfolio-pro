@@ -30,6 +30,7 @@ import {
   type ReturnSanityDiagnostics,
 } from '@/lib/portfolio-returns'
 import { buildPositions, portfolioSummary } from '@/lib/position-engine'
+import { transactionFeeBase } from '@/lib/transaction-math'
 import {
   CSV_IMPORT_SOURCE_LABELS,
   parseHistoricalPriceCsv,
@@ -446,10 +447,10 @@ export default function PortfolioIntelligencePage() {
     return explicitTarget > 0 ? explicitTarget : edoBonds.length > 0 ? 25 : 0
   }, [assets, edoBonds.length])
 
-  const transactionFees = transactions.reduce((sum, transaction) => sum + num(transaction.fees), 0)
+  const transactionFees = transactions.reduce((sum, transaction) => sum + transactionFeeBase(transaction), 0)
   const bondPnl = edoSummary.currentValueAfterTax - edoSummary.principal
   const totalValue = summary.totalValue + edoSummary.currentValueAfterTax + cashSummary.cashBalanceBase
-  const realizedPnl = summary.realizedPnl + dividendSummary.netBase - transactionFees - cashSummary.feesBase - cashSummary.taxesBase
+  const realizedPnl = summary.realizedPnl + dividendSummary.netBase - cashSummary.feesBase - cashSummary.taxesBase
   const unrealizedPnl = summary.unrealizedPnl + bondPnl
   const feesAndTaxes = transactionFees + cashSummary.feesBase + cashSummary.taxesBase + dividendSummary.taxBase
   const allocationDrift = useMemo(() => buildAllocationDrift(positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue), [positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue])

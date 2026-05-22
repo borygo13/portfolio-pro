@@ -1,4 +1,5 @@
 import type { Asset, Transaction } from '@/lib/supabase/portfolio'
+import { transactionNetBaseOrNull } from '@/lib/transaction-math'
 
 export type AssetPrice = {
   id: string
@@ -26,6 +27,7 @@ export type Position = {
   allocationPct: number
   targetAllocation: number
   allocationDiff: number
+  baseCostComplete: boolean
 }
 
 function num(value: unknown) {
@@ -50,15 +52,20 @@ export function buildPositions(assets: Asset[], transactions: Transaction[], pri
     let remainingCost = 0
     let investedCost = 0
     let realizedPnl = 0
+    let baseCostComplete = true
 
     for (const t of assetTx) {
       const qty = num(t.quantity)
-      const price = num(t.price)
-      const fees = num(t.fees)
-      if (qty <= 0 || price < 0) continue
+      const netBase = transactionNetBaseOrNull(t)
+      if (qty <= 0) continue
 
       if (t.transaction_type === 'BUY') {
-        const buyCost = qty * price + fees
+        if (netBase == null) {
+          quantity += qty
+          baseCostComplete = false
+          continue
+        }
+        const buyCost = netBase
         quantity += qty
         remainingCost += buyCost
         investedCost += buyCost
@@ -70,8 +77,12 @@ export function buildPositions(assets: Asset[], transactions: Transaction[], pri
 
         const avgBeforeSell = quantity > 0 ? remainingCost / quantity : 0
         const costRemoved = avgBeforeSell * sellQty
-        const proceeds = sellQty * price - fees
-        realizedPnl += proceeds - costRemoved
+        const proceeds = netBase == null ? null : netBase * (sellQty / qty)
+        if (proceeds == null) {
+          baseCostComplete = false
+        } else {
+          realizedPnl += proceeds - costRemoved
+        }
         quantity -= sellQty
         remainingCost -= costRemoved
 
@@ -85,7 +96,7 @@ export function buildPositions(assets: Asset[], transactions: Transaction[], pri
     const currentPrice = priceByAsset.get(asset.id) ?? (quantity > 0 ? remainingCost / quantity : 0)
     const currentValue = quantity * currentPrice
     const avgPrice = quantity > 0 ? remainingCost / quantity : 0
-    const unrealizedPnl = currentValue - remainingCost
+    const unrealizedPnl = baseCostComplete ? currentValue - remainingCost : 0
     const totalPnl = realizedPnl + unrealizedPnl
     const baseForReturn = remainingCost > 0 ? remainingCost : investedCost
     const returnPct = baseForReturn > 0 ? totalPnl / baseForReturn : 0
@@ -105,6 +116,7 @@ export function buildPositions(assets: Asset[], transactions: Transaction[], pri
       allocationPct: 0,
       targetAllocation: num(asset.target_allocation),
       allocationDiff: 0,
+      baseCostComplete,
     }
   })
 
@@ -142,7 +154,8 @@ export function buildSimpleEquityCurve(transactions: Transaction[], currentValue
     const d = new Date(t.transaction_date)
     if (Number.isNaN(d.getTime())) continue
     const key = d.toLocaleDateString('pl-PL', { month: 'short', year: '2-digit' })
-    const amount = Number(t.quantity) * Number(t.price) + Number(t.fees ?? 0)
+    const amount = transactionNetBaseOrNull(t)
+    if (amount == null) continue
     byMonth.set(key, (byMonth.get(key) ?? 0) + (t.transaction_type === 'BUY' ? amount : -amount))
   }
 

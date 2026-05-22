@@ -1,6 +1,7 @@
 import { buildAllocationBreakdown, isMarketPricedAsset, num, summarizeCashLedger, summarizeDividends } from '@/lib/portfolio-intelligence'
 import { buildPositions, portfolioSummary, type AssetPrice } from '@/lib/position-engine'
 import { FX_PREVIOUS_LOOKBACK_DAYS, fxDaysBetween } from '@/lib/market/fx'
+import { transactionFeeBase } from '@/lib/transaction-math'
 import type {
   Asset,
   CashLedgerEntry,
@@ -55,6 +56,7 @@ const MAX_SNAPSHOT_DAYS_PER_REQUEST = 1200
 const UPSERT_CHUNK_SIZE = 200
 const PRICE_LOOKBACK_DAYS = 14
 const MAX_REPORTED_DAYS = 20
+const BACKFILL_TRANSACTION_SELECT = 'id,portfolio_id,asset_id,transaction_type,quantity,price,fees,source_currency,price_source,fees_source,fx_rate_to_base,base_currency,price_base,fees_base,gross_amount_source,gross_amount_base,fx_rate_date,fx_rate_source,transaction_date,notes,created_at'
 
 function formatDate(date: Date) {
   return date.toISOString().slice(0, 10)
@@ -229,7 +231,7 @@ async function fetchInputs(supabase: ServerSupabase, portfolioId: string, startD
   ] = await Promise.all([
     supabase.from('portfolios').select('id,user_id,name,currency').eq('id', portfolioId).single(),
     supabase.from('assets').select('id,portfolio_id,symbol,name,asset_type,currency,target_allocation,market_symbol,price_source,auto_refresh_enabled,created_at').eq('portfolio_id', portfolioId).limit(5000),
-    supabase.from('transactions').select('id,portfolio_id,asset_id,transaction_type,quantity,price,fees,transaction_date,notes,created_at').eq('portfolio_id', portfolioId).lte('transaction_date', endDate).limit(50000),
+    supabase.from('transactions').select(BACKFILL_TRANSACTION_SELECT).eq('portfolio_id', portfolioId).lte('transaction_date', endDate).limit(50000),
     supabase.from('cash_ledger_entries').select('id,portfolio_id,entry_type,amount,currency,entry_date,note,created_at,updated_at').eq('portfolio_id', portfolioId).lte('entry_date', endDate).limit(50000),
     supabase.from('dividends').select('id,portfolio_id,asset_id,payment_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at').eq('portfolio_id', portfolioId).lte('payment_date', endDate).limit(50000),
     supabase.from('edo_bonds').select('id,portfolio_id,series,quantity,purchase_price,purchase_date,interest_first_year,inflation_margin,maturity_date,created_at').eq('portfolio_id', portfolioId).limit(5000),
@@ -375,13 +377,13 @@ export async function runPortfolioHistoryBackfill(options: {
       const summary = portfolioSummary(positions)
       const cashSummary = summarizeCashLedger(cashEntries, baseCurrency)
       const dividendSummary = summarizeDividends(dividends, baseCurrency)
-      const transactionFees = transactions.reduce((sum, transaction) => sum + num(transaction.fees), 0)
+      const transactionFees = transactions.reduce((sum, transaction) => sum + transactionFeeBase(transaction), 0)
       const positionsValue = summary.totalValue
       const cashValue = cashSummary.cashBalanceBase
       const totalValue = positionsValue + edoPrincipal + cashValue
       const feesValue = cashSummary.feesBase + transactionFees
       const taxesValue = cashSummary.taxesBase + dividendSummary.taxBase
-      const realizedPnl = summary.realizedPnl + dividendSummary.netBase - feesValue - taxesValue
+      const realizedPnl = summary.realizedPnl + dividendSummary.netBase - cashSummary.feesBase - cashSummary.taxesBase
       const unrealizedPnl = summary.unrealizedPnl
       const contributionFallback = summary.investedCost + edoPrincipal
       const hasCashLedgerFlow = cashEntries.some((entry) => entry.entry_type === 'deposit' || entry.entry_type === 'withdrawal')
