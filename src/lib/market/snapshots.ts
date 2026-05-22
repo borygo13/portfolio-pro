@@ -1,9 +1,12 @@
 import { projectEdoBond, summarizeEdoBonds } from '@/lib/bond-engine'
-import { buildAllocationBreakdown, summarizeCashLedger, summarizeDividends, num } from '@/lib/portfolio-intelligence'
+import { buildAllocationBreakdown, summarizeCashLedger, summarizeDividends } from '@/lib/portfolio-intelligence'
 import { buildPositions, portfolioSummary } from '@/lib/position-engine'
 import type { Asset, CashLedgerEntry, DividendRecord, EdoBond, Portfolio, PortfolioBenchmark, Transaction } from '@/lib/supabase/portfolio'
+import { transactionFeeBase } from '@/lib/transaction-math'
 import type { AssetPrice } from '@/lib/position-engine'
 import type { ServerSupabase } from './persistence'
+
+const SNAPSHOT_TRANSACTION_SELECT = 'id,portfolio_id,asset_id,transaction_type,quantity,price,fees,source_currency,price_source,fees_source,fx_rate_to_base,base_currency,price_base,fees_base,gross_amount_source,gross_amount_base,fx_rate_date,fx_rate_source,transaction_date,notes,created_at'
 
 function today() {
   return new Date().toISOString().slice(0, 10)
@@ -13,7 +16,7 @@ async function fetchPortfolioSnapshotInputs(supabase: ServerSupabase, portfolioI
   const [portfolioRes, assetsRes, transactionsRes, pricesRes, bondsRes, cashRes, dividendsRes, benchmarkRes] = await Promise.all([
     supabase.from('portfolios').select('id,user_id,name,currency').eq('id', portfolioId).single(),
     supabase.from('assets').select('id,portfolio_id,symbol,name,asset_type,currency,target_allocation,created_at').eq('portfolio_id', portfolioId),
-    supabase.from('transactions').select('id,portfolio_id,asset_id,transaction_type,quantity,price,fees,transaction_date,notes,created_at').eq('portfolio_id', portfolioId),
+    supabase.from('transactions').select(SNAPSHOT_TRANSACTION_SELECT).eq('portfolio_id', portfolioId),
     supabase.from('asset_prices').select('id,portfolio_id,asset_id,price,currency,priced_at,created_at,updated_at').eq('portfolio_id', portfolioId),
     supabase.from('edo_bonds').select('id,portfolio_id,series,quantity,purchase_price,purchase_date,interest_first_year,inflation_margin,maturity_date,created_at').eq('portfolio_id', portfolioId),
     supabase.from('cash_ledger_entries').select('id,portfolio_id,entry_type,amount,currency,entry_date,note,created_at,updated_at').eq('portfolio_id', portfolioId),
@@ -50,7 +53,7 @@ export async function createPortfolioSnapshot(supabase: ServerSupabase, portfoli
   const baseCurrency = portfolio.currency ?? 'PLN'
   const cashSummary = summarizeCashLedger(cashEntries, baseCurrency)
   const dividendSummary = summarizeDividends(dividends, baseCurrency)
-  const transactionFees = transactions.reduce((sum, transaction) => sum + num(transaction.fees), 0)
+  const transactionFees = transactions.reduce((sum, transaction) => sum + transactionFeeBase(transaction), 0)
 
   const positionsValue = summary.totalValue
   const edoValue = edoSummary.currentValueAfterTax

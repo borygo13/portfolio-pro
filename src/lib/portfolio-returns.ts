@@ -6,6 +6,7 @@ import type {
   SupportedCashCurrency,
   Transaction,
 } from '@/lib/supabase/portfolio'
+import { transactionFeeBase, transactionNetBaseOrNull } from '@/lib/transaction-math'
 
 export type ReturnMetric = {
   available: boolean
@@ -289,13 +290,11 @@ function buildEvents(input: EngineInput) {
   }
 
   for (const transaction of input.transactions) {
-    const assetCurrency = supportedCurrency(transaction.assets?.currency ?? baseCurrency)
-    if (assetCurrency !== baseCurrency) continue
-    const gross = n(transaction.quantity) * n(transaction.price)
-    const fees = n(transaction.fees)
+    const fees = transactionFeeBase(transaction)
     if (fees > 0) addEvent(events, transaction.transaction_date, { expense: fees })
-    if (gross <= 0) continue
-    const flow = transaction.transaction_type === 'BUY' ? gross + fees : -(gross - fees)
+    const netBase = transactionNetBaseOrNull(transaction)
+    if (netBase == null || netBase <= 0) continue
+    const flow = transaction.transaction_type === 'BUY' ? netBase : -netBase
     addEvent(events, transaction.transaction_date, { transactionFlowProxy: flow })
   }
 

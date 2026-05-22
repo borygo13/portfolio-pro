@@ -469,6 +469,59 @@ CSV/manual pozostaje jawny fallback dla historii, której providerzy nie potrafi
 
 Żeby dodać kolejne presety, dodaj nową addytywną migrację z `insert into instrument_catalog (...) values (...) on conflict (provider, market_symbol) do update ...`. Nie zmieniaj ręcznie istniejących symboli użytkownika bez świadomego zastosowania presetu w UI.
 
+### Stage C5.8 - Multi-currency transactions
+
+Apply the additive migration by running the contents of `supabase/stage-c5-8-multi-currency-transactions.sql` in Supabase SQL Editor.
+
+The migration does not drop or rename existing `transactions` columns. Legacy `price` and `fees` stay usable as base-currency fallback values, while new C5.8 rows also store:
+
+- `source_currency`, `price_source`, `fees_source` for the instrument/trade currency entered by the user,
+- `base_currency`, `price_base`, `fees_base`, `gross_amount_base` for safe portfolio-currency valuation,
+- `fx_rate_to_base`, `fx_rate_date`, `fx_rate_source` when historical/previous FX was available.
+
+Transaction UX rules:
+
+- For AAPL, enter price and fee in USD. The form shows an approximate PLN value when USD/PLN exists.
+- For IUSQ.DE or 500.PA, enter price and fee in EUR. PLN valuation uses EUR/PLN.
+- For GPW/PLN assets, no FX section is shown and PLN is used directly.
+- If FX is missing, the transaction can still be saved in the instrument currency, but PLN valuation is marked limited. The app does not fake FX = 1 for USD/EUR/GBP/CHF.
+- `create_transaction_checked` keeps its existing RPC signature and oversell protection. The app calls the RPC first, then updates only the additive C5.8 currency columns on the inserted row.
+
+Portfolio-level calculations prefer `price_base`/`fees_base` when available and fall back to legacy `price`/`fees` only for rows whose source currency matches the base currency. Instrument/source values are primary in transaction history; base/PLN values are secondary estimates.
+
+Deployment notes:
+
+- C5.8 does not add a new required environment variable.
+- Browser code may only use `NEXT_PUBLIC_*` Supabase values.
+- `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `EODHD_API_KEY` and future broker/API secrets must remain server-side in Vercel Project Environment Variables, not in frontend bundles.
+- GitHub Repository Secrets do not automatically become Vercel runtime variables; configure Vercel Preview/Production env vars separately.
+- Leveraged trading, CFDs, Bybit futures and broker CSV import are intentionally outside C5.8.
+
+Useful verification queries:
+
+```sql
+select
+  transaction_date,
+  source_currency,
+  price_source,
+  fees_source,
+  fx_rate_to_base,
+  fx_rate_date,
+  base_currency,
+  price_base,
+  fees_base,
+  gross_amount_base
+from transactions
+order by created_at desc
+limit 20;
+
+select
+  count(*) filter (where source_currency is null) as missing_source_currency,
+  count(*) filter (where source_currency <> coalesce(base_currency, 'PLN') and price_base is null) as foreign_rows_without_base,
+  count(*) filter (where source_currency <> coalesce(base_currency, 'PLN') and fx_rate_to_base is null) as foreign_rows_without_fx
+from transactions;
+```
+
 ### SQL verification katalogu
 
 ```sql

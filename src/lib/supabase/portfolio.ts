@@ -1,6 +1,8 @@
 import type { User } from '@supabase/supabase-js'
+import { BASE_CURRENCY } from '@/lib/currency'
 import { searchInstrumentCatalogRows } from '@/lib/instruments/search'
 import { FX_PREVIOUS_LOOKBACK_DAYS, fxAddDays, fxDaysBetween, normalizeCurrencyCode } from '@/lib/market/fx'
+import { calculateTransactionAmounts } from '@/lib/transaction-math'
 import { supabase } from './client'
 import { ensureUserWorkspace } from './bootstrap'
 
@@ -113,6 +115,9 @@ export async function deleteAsset(assetId: string) {
 
 export type TransactionType = 'BUY' | 'SELL'
 
+export const TRANSACTION_SELECT = 'id,portfolio_id,asset_id,transaction_type,quantity,price,fees,source_currency,price_source,fees_source,fx_rate_to_base,base_currency,price_base,fees_base,gross_amount_source,gross_amount_base,fx_rate_date,fx_rate_source,transaction_date,notes,created_at'
+const TRANSACTION_SELECT_WITH_ASSET = `${TRANSACTION_SELECT},assets(symbol,name,asset_type,currency)`
+
 export type Transaction = {
   id: string
   portfolio_id: string
@@ -121,6 +126,17 @@ export type Transaction = {
   quantity: number
   price: number
   fees: number | null
+  source_currency?: string | null
+  price_source?: number | null
+  fees_source?: number | null
+  fx_rate_to_base?: number | null
+  base_currency?: string | null
+  price_base?: number | null
+  fees_base?: number | null
+  gross_amount_source?: number | null
+  gross_amount_base?: number | null
+  fx_rate_date?: string | null
+  fx_rate_source?: string | null
   transaction_date: string
   notes: string | null
   created_at: string
@@ -133,6 +149,17 @@ export type CreateTransactionInput = {
   quantity: number
   price: number
   fees: number
+  source_currency?: string | null
+  price_source?: number | null
+  fees_source?: number | null
+  fx_rate_to_base?: number | null
+  base_currency?: string | null
+  price_base?: number | null
+  fees_base?: number | null
+  gross_amount_source?: number | null
+  gross_amount_base?: number | null
+  fx_rate_date?: string | null
+  fx_rate_source?: string | null
   transaction_date: string
   notes?: string
 }
@@ -140,7 +167,7 @@ export type CreateTransactionInput = {
 export async function listTransactions(portfolioId: string): Promise<Transaction[]> {
   const { data, error } = await supabase
     .from('transactions')
-    .select('id,portfolio_id,asset_id,transaction_type,quantity,price,fees,transaction_date,notes,created_at,assets(symbol,name,asset_type,currency)')
+    .select(TRANSACTION_SELECT_WITH_ASSET)
     .eq('portfolio_id', portfolioId)
     .order('transaction_date', { ascending: false })
     .order('created_at', { ascending: false })
@@ -150,13 +177,28 @@ export async function listTransactions(portfolioId: string): Promise<Transaction
 }
 
 export async function createTransaction(portfolioId: string, input: CreateTransactionInput): Promise<Transaction> {
+  const amounts = calculateTransactionAmounts({
+    transactionType: input.transaction_type,
+    quantity: input.quantity,
+    priceSource: input.price_source ?? input.price,
+    feesSource: input.fees_source ?? input.fees ?? 0,
+    sourceCurrency: input.source_currency,
+    fxRateToBase: input.fx_rate_to_base,
+    baseCurrency: input.base_currency ?? BASE_CURRENCY,
+    fxRateDate: input.fx_rate_date,
+    fxRateSource: input.fx_rate_source,
+  })
+
+  const legacyPrice = amounts.priceBase ?? amounts.priceSource
+  const legacyFees = amounts.feesBase ?? amounts.feesSource
+
   const { data: inserted, error } = await supabase.rpc('create_transaction_checked', {
     p_portfolio_id: portfolioId,
     p_asset_id: input.asset_id,
     p_transaction_type: input.transaction_type,
-    p_quantity: input.quantity,
-    p_price: input.price,
-    p_fees: input.fees || 0,
+    p_quantity: amounts.quantity,
+    p_price: legacyPrice,
+    p_fees: legacyFees || 0,
     p_transaction_date: input.transaction_date,
     p_notes: input.notes?.trim() || null,
   })
@@ -166,9 +208,28 @@ export async function createTransaction(portfolioId: string, input: CreateTransa
   const insertedId = (inserted as { id?: string } | null)?.id
   if (!insertedId) throw new Error('Nie udało się odczytać zapisanej transakcji.')
 
+  const { error: updateError } = await supabase
+    .from('transactions')
+    .update({
+      source_currency: amounts.sourceCurrency,
+      price_source: amounts.priceSource,
+      fees_source: amounts.feesSource,
+      fx_rate_to_base: amounts.fxRateToBase,
+      base_currency: amounts.baseCurrency,
+      price_base: amounts.priceBase,
+      fees_base: amounts.feesBase,
+      gross_amount_source: amounts.grossAmountSource,
+      gross_amount_base: amounts.grossAmountBase,
+      fx_rate_date: amounts.fxRateDate,
+      fx_rate_source: amounts.fxRateSource,
+    })
+    .eq('id', insertedId)
+
+  if (updateError) throw new Error(`Transakcja została utworzona, ale nie udało się zapisać danych walutowych: ${updateError.message}`)
+
   const { data, error: fetchError } = await supabase
     .from('transactions')
-    .select('id,portfolio_id,asset_id,transaction_type,quantity,price,fees,transaction_date,notes,created_at,assets(symbol,name,asset_type,currency)')
+    .select(TRANSACTION_SELECT_WITH_ASSET)
     .eq('id', insertedId)
     .single()
 
