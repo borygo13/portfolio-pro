@@ -1,13 +1,25 @@
 import { NextResponse } from 'next/server'
+import { SUPPORTED_TRANSACTION_CURRENCIES } from '@/lib/currency'
 import { FX_PREVIOUS_LOOKBACK_DAYS, fxDateKey, fxDaysBetween, normalizeCurrencyCode } from '@/lib/market/fx'
 import { getNbpHistoricalRatesToPlnWithFallback } from '@/lib/market/providers/nbp'
 
 const BASE_CURRENCY = 'PLN'
+const SUPPORTED_CURRENCIES = new Set<string>(SUPPORTED_TRANSACTION_CURRENCIES)
 
 export async function GET(request: Request) {
   const url = new URL(request.url)
   const currency = normalizeCurrencyCode(url.searchParams.get('currency'), BASE_CURRENCY)
   const date = fxDateKey(url.searchParams.get('date'))
+
+  if (!SUPPORTED_CURRENCIES.has(currency)) {
+    return NextResponse.json({
+      ok: false,
+      error: 'UNSUPPORTED_CURRENCY',
+      currency,
+      baseCurrency: BASE_CURRENCY,
+      message: `Waluta ${currency} nie jest obsługiwana dla transakcji. Obsługiwane: ${SUPPORTED_TRANSACTION_CURRENCIES.join(', ')}.`,
+    }, { status: 400 })
+  }
 
   if (!date) {
     return NextResponse.json({ ok: false, error: 'INVALID_DATE', message: 'Podaj poprawną datę transakcji.' }, { status: 400 })

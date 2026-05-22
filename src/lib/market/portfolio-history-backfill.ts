@@ -383,7 +383,7 @@ export async function runPortfolioHistoryBackfill(options: {
       const totalValue = positionsValue + edoPrincipal + cashValue
       const feesValue = cashSummary.feesBase + transactionFees
       const taxesValue = cashSummary.taxesBase + dividendSummary.taxBase
-      const realizedPnl = summary.realizedPnl + dividendSummary.netBase - feesValue - taxesValue
+      const realizedPnl = summary.realizedPnl + dividendSummary.netBase - cashSummary.feesBase - cashSummary.taxesBase
       const unrealizedPnl = summary.unrealizedPnl
       const contributionFallback = summary.investedCost + edoPrincipal
       const hasCashLedgerFlow = cashEntries.some((entry) => entry.entry_type === 'deposit' || entry.entry_type === 'withdrawal')

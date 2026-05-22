@@ -61,7 +61,7 @@ export async function createPortfolioSnapshot(supabase: ServerSupabase, portfoli
   const totalValue = positionsValue + edoValue + cashValue
   const feesValue = cashSummary.feesBase + transactionFees
   const taxesValue = cashSummary.taxesBase + dividendSummary.taxBase
-  const realizedPnl = summary.realizedPnl + dividendSummary.netBase - feesValue - taxesValue
+  const realizedPnl = summary.realizedPnl + dividendSummary.netBase - cashSummary.feesBase - cashSummary.taxesBase
   const unrealizedPnl = summary.unrealizedPnl + (edoValue - edoSummary.principal)
   const totalPnl = realizedPnl + unrealizedPnl
   const allocationBreakdown = buildAllocationBreakdown(positions, edoValue, cashValue, totalValue)

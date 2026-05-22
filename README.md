@@ -492,6 +492,7 @@ Portfolio-level calculations prefer `price_base`/`fees_base` when available and 
 Deployment notes:
 
 - C5.8 does not add a new required environment variable.
+- Safe deployment order: apply `supabase/stage-c5-8-multi-currency-transactions.sql` in Supabase first, then deploy the C5.8 app build. The new UI and snapshot queries select the additive columns directly.
 - Browser code may only use `NEXT_PUBLIC_*` Supabase values.
 - `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `EODHD_API_KEY` and future broker/API secrets must remain server-side in Vercel Project Environment Variables, not in frontend bundles.
 - GitHub Repository Secrets do not automatically become Vercel runtime variables; configure Vercel Preview/Production env vars separately.

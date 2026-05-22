@@ -206,6 +206,7 @@ export default function TransactionsPage() {
       return { result: null, error: err?.message ?? 'Nie udało się policzyć transakcji.' }
     }
   }, [baseCurrency, fees, fxPreview.rate, fxPreview.rateDate, fxPreview.source, price, quantity, sourceCurrency, type])
+  const fxLoading = sourceCurrency !== baseCurrency && fxPreview.status === 'loading'
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -217,6 +218,7 @@ export default function TransactionsPage() {
     try {
       if (!assetId) throw new Error('Wybierz aktywo.')
       if (!date) throw new Error('Podaj datę transakcji.')
+      if (fxLoading) throw new Error('Poczekaj na sprawdzenie kursu FX.')
       if (!preview.result) throw new Error(preview.error ?? 'Uzupełnij poprawne wartości transakcji.')
 
       const q = preview.result.quantity
@@ -349,7 +351,7 @@ export default function TransactionsPage() {
                       </>
                     ) : null}
                     {fxPreview.status === 'missing' || fxPreview.status === 'error' ? (
-                      <span className="text-amber-100">Brak kursu dla tej daty. Transakcja zostanie zapisana w walucie instrumentu, ale wycena PLN będzie ograniczona.</span>
+                      <span className="text-amber-100">{fxPreview.message ?? 'Brak kursu dla tej daty.'} Transakcja zostanie zapisana w walucie instrumentu, ale wycena PLN będzie ograniczona.</span>
                     ) : null}
                   </div>
                 ) : null}
@@ -387,7 +389,7 @@ export default function TransactionsPage() {
                     <div>
                       <span className="text-slate-500">Szacunkowo w {baseCurrency}</span>
                       <p className="font-semibold text-white">
-                        {preview.result.netAmountBase == null ? 'brak kursu FX' : formatCurrencyValue(preview.result.netAmountBase, baseCurrency, 2)}
+                        {fxLoading ? 'pobieram kurs FX...' : preview.result.netAmountBase == null ? 'brak kursu FX' : formatCurrencyValue(preview.result.netAmountBase, baseCurrency, 2)}
                       </p>
                     </div>
                   </div>
@@ -404,7 +406,7 @@ export default function TransactionsPage() {
               {error ? <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
               {success ? <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">{success}</div> : null}
 
-              <button disabled={saving || !preview.result} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-violet-500 px-5 py-4 text-sm font-bold text-white shadow-lg shadow-violet-950/40 transition hover:bg-violet-400 disabled:cursor-not-allowed disabled:opacity-60">
+              <button disabled={saving || !preview.result || fxLoading} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-violet-500 px-5 py-4 text-sm font-bold text-white shadow-lg shadow-violet-950/40 transition hover:bg-violet-400 disabled:cursor-not-allowed disabled:opacity-60">
                 {saving ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
                 Zapisz transakcję
               </button>
