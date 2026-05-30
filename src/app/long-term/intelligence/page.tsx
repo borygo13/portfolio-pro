@@ -2,11 +2,13 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent, FormEvent, InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from 'react'
+import Link from 'next/link'
 import { Banknote, BarChart3, CheckCircle2, FileUp, History, Loader2, Percent, Plus, Save, Search, Scale, Trash2, TrendingDown, TrendingUp } from 'lucide-react'
 import { BenchmarkComparisonChart, BenchmarkRelativeChart, DrawdownCurveChart, MonthlyDividendChart, RollingReturnChart } from '@/components/Charts'
 import { Card, PageHeader, Shell, StatCard, TrustBadge } from '@/components/Shell'
 import { projectEdoBond, summarizeEdoBonds } from '@/lib/bond-engine'
 import { PLN, PCT, formatCurrencyValue } from '@/lib/format'
+import { summarizeIncomeEvents } from '@/lib/income-engine'
 import { instrumentMeta, instrumentProviderCandidates, instrumentReadiness, searchInstrumentCatalogRows } from '@/lib/instruments/search'
 import {
   buildAllocationDrift,
@@ -43,7 +45,6 @@ import { supabase } from '@/lib/supabase/client'
 import {
   applyInstrumentPresetToAsset,
   createCashLedgerEntry,
-  createDividend,
   deleteCashLedgerEntry,
   deleteDividend,
   getDefaultPortfolio,
@@ -56,6 +57,7 @@ import {
   listCashLedgerEntries,
   listDividends,
   listEdoBonds,
+  listIncomeEvents,
   listMarketPriceHistory,
   listPortfolioSnapshots,
   listTransactions,
@@ -67,6 +69,7 @@ import {
   type CashLedgerEntryType,
   type DividendRecord,
   type EdoBond,
+  type IncomeEvent,
   type InstrumentCatalogRow,
   type MarketPriceDiagnostics,
   type MarketPriceHistoryPoint,
@@ -260,6 +263,7 @@ export default function PortfolioIntelligencePage() {
   const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([])
   const [cashEntries, setCashEntries] = useState<CashLedgerEntry[]>([])
   const [dividendRecords, setDividendRecords] = useState<DividendRecord[]>([])
+  const [incomeEvents, setIncomeEvents] = useState<IncomeEvent[]>([])
   const [instrumentCatalog, setInstrumentCatalog] = useState<InstrumentCatalogRow[]>([])
   const [benchmarkCatalog, setBenchmarkCatalog] = useState<InstrumentCatalogRow[]>([])
   const [benchmark, setBenchmark] = useState<PortfolioBenchmark | null>(null)
@@ -298,15 +302,6 @@ export default function PortfolioIntelligencePage() {
     entry_date: today(),
     note: '',
   })
-  const [dividendForm, setDividendForm] = useState({
-    asset_id: '',
-    payment_date: today(),
-    gross_amount: '',
-    tax_amount: '',
-    currency: 'PLN' as SupportedCashCurrency,
-    note: '',
-  })
-
   async function loadData() {
     setLoading(true)
     setError(null)
@@ -322,6 +317,7 @@ export default function PortfolioIntelligencePage() {
         snapshotList,
         cashList,
         dividendList,
+        incomeList,
         benchmarkRow,
         catalogRows,
         benchmarkCatalogRows,
@@ -333,6 +329,7 @@ export default function PortfolioIntelligencePage() {
         listPortfolioSnapshots(defaultPortfolio.id),
         listCashLedgerEntries(defaultPortfolio.id),
         listDividends(defaultPortfolio.id),
+        listIncomeEvents(defaultPortfolio.id),
         getPortfolioBenchmark(defaultPortfolio.id),
         listInstrumentCatalog(),
         listBenchmarkCandidates(),
@@ -347,6 +344,7 @@ export default function PortfolioIntelligencePage() {
       setSnapshots(snapshotList)
       setCashEntries(cashList)
       setDividendRecords(dividendList)
+      setIncomeEvents(incomeList)
       setInstrumentCatalog(catalogRows)
       setBenchmarkCatalog(benchmarkCatalogRows)
       setBenchmark(benchmarkRow)
@@ -360,13 +358,6 @@ export default function PortfolioIntelligencePage() {
       setMarketSymbolDrafts(Object.fromEntries(assetList.map((asset) => [asset.id, asset.market_symbol ?? ''])))
       setCashForm((current) => ({ ...current, currency: baseCurrency }))
       setCsvImportCurrency(baseCurrency)
-      setDividendForm((current) => ({
-        ...current,
-        currency: baseCurrency,
-        asset_id: current.asset_id && assetList.some((asset) => asset.id === current.asset_id)
-          ? current.asset_id
-          : assetList.find(isMarketPricedAsset)?.id ?? assetList[0]?.id ?? '',
-      }))
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się pobrać danych C5.')
     } finally {
@@ -429,6 +420,7 @@ export default function PortfolioIntelligencePage() {
   const edoSummary = useMemo(() => summarizeEdoBonds(edoBonds.map((bond) => projectEdoBond(bond))), [edoBonds])
   const cashSummary = useMemo(() => summarizeCashLedger(cashEntries, baseCurrency), [cashEntries, baseCurrency])
   const dividendSummary = useMemo(() => summarizeDividends(dividendRecords, baseCurrency), [dividendRecords, baseCurrency])
+  const incomeSummary = useMemo(() => summarizeIncomeEvents(incomeEvents, baseCurrency), [incomeEvents, baseCurrency])
   const monthlyDividends = useMemo(() => buildMonthlyDividendPoints(dividendRecords, baseCurrency), [dividendRecords, baseCurrency])
   const performance = useMemo(() => buildPortfolioPerformance(snapshots), [snapshots])
   const benchmarkPerformance = useMemo(() => buildBenchmarkPerformance(snapshots, benchmarkHistory), [snapshots, benchmarkHistory])
@@ -436,10 +428,11 @@ export default function PortfolioIntelligencePage() {
     snapshots,
     cashEntries,
     dividends: dividendRecords,
+    incomeEvents,
     transactions,
     benchmarkHistory,
     baseCurrency,
-  }), [snapshots, cashEntries, dividendRecords, transactions, benchmarkHistory, baseCurrency])
+  }), [snapshots, cashEntries, dividendRecords, incomeEvents, transactions, benchmarkHistory, baseCurrency])
   const bondsTarget = useMemo(() => {
     const explicitTarget = assets
       .filter((asset) => asset.asset_type === 'Obligacje' || asset.symbol.toUpperCase().includes('EDO'))
@@ -450,9 +443,9 @@ export default function PortfolioIntelligencePage() {
   const transactionFees = transactions.reduce((sum, transaction) => sum + transactionFeeBase(transaction), 0)
   const bondPnl = edoSummary.currentValueAfterTax - edoSummary.principal
   const totalValue = summary.totalValue + edoSummary.currentValueAfterTax + cashSummary.cashBalanceBase
-  const realizedPnl = summary.realizedPnl + dividendSummary.netBase - cashSummary.feesBase - cashSummary.taxesBase
+  const realizedPnl = summary.realizedPnl + dividendSummary.netBase + incomeSummary.netBase - cashSummary.feesBase - cashSummary.taxesBase
   const unrealizedPnl = summary.unrealizedPnl + bondPnl
-  const feesAndTaxes = transactionFees + cashSummary.feesBase + cashSummary.taxesBase + dividendSummary.taxBase
+  const feesAndTaxes = transactionFees + cashSummary.feesBase + cashSummary.taxesBase + dividendSummary.taxBase + incomeSummary.taxBase
   const allocationDrift = useMemo(() => buildAllocationDrift(positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue), [positions, edoSummary.currentValueAfterTax, bondsTarget, cashSummary.cashBalanceBase, totalValue])
   const selectedBenchmark = assets.find((asset) => asset.id === benchmarkAssetId) ?? null
   const selectedBackfillAsset = marketAssets.find((asset) => asset.id === backfillAssetId) ?? null
@@ -489,34 +482,6 @@ export default function PortfolioIntelligencePage() {
       setCashForm((current) => ({ ...current, amount: '', note: '' }))
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się dodać wpisu cash ledger.')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function handleDividendSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!portfolio) return
-    const gross = Number(dividendForm.gross_amount)
-    const tax = Number(dividendForm.tax_amount || 0)
-    const net = gross - tax
-    if (!dividendForm.asset_id || !dividendForm.payment_date || !Number.isFinite(gross) || gross < 0 || !Number.isFinite(tax) || tax < 0 || !Number.isFinite(net) || net < 0) {
-      setError('Uzupełnij aktywo, datę płatności oraz poprawne kwoty dywidendy: brutto, podatek i netto nie mogą być ujemne.')
-      return
-    }
-
-    setSaving(true)
-    setError(null)
-    try {
-      const created = await createDividend(portfolio.id, {
-        ...dividendForm,
-        gross_amount: gross,
-        tax_amount: tax,
-      })
-      setDividendRecords((current) => [created, ...current])
-      setDividendForm((current) => ({ ...current, gross_amount: '', tax_amount: '', note: '' }))
-    } catch (err: any) {
-      setError(err?.message ?? 'Nie udało się dodać dywidendy.')
     } finally {
       setSaving(false)
     }
@@ -900,24 +865,11 @@ export default function PortfolioIntelligencePage() {
           </div>
           <div className="grid gap-6 2xl:grid-cols-[.8fr_1.2fr]">
             <Card>
-              <h3 className="text-lg font-bold text-white">Dodaj dywidendę</h3>
-              <form onSubmit={handleDividendSubmit} className="mt-5 space-y-3">
-                <Select value={dividendForm.asset_id} onChange={(value) => setDividendForm((current) => ({ ...current, asset_id: value }))}>
-                  {assets.length === 0 ? <option value="">Brak aktywów</option> : assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.symbol} · {asset.name}</option>)}
-                </Select>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <Input type="number" step="0.01" min="0" placeholder="Brutto" value={dividendForm.gross_amount} onChange={(value) => setDividendForm((current) => ({ ...current, gross_amount: value }))} />
-                  <Input type="number" step="0.01" min="0" placeholder="Podatek" value={dividendForm.tax_amount} onChange={(value) => setDividendForm((current) => ({ ...current, tax_amount: value }))} />
-                </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <Input type="date" value={dividendForm.payment_date} onChange={(value) => setDividendForm((current) => ({ ...current, payment_date: value }))} />
-                  <Select value={dividendForm.currency} onChange={(value) => setDividendForm((current) => ({ ...current, currency: value as SupportedCashCurrency }))}>
-                    {currencies.map((currency) => <option key={currency} value={currency}>{currency}</option>)}
-                  </Select>
-                </div>
-                <Input placeholder="Notatka" value={dividendForm.note} onChange={(value) => setDividendForm((current) => ({ ...current, note: value }))} />
-                <SubmitButton disabled={saving || assets.length === 0}><Plus size={16} /> Dodaj dywidendę</SubmitButton>
-              </form>
+              <h3 className="text-lg font-bold text-white">Nowy silnik dochodów</h3>
+              <p className="mt-2 text-sm leading-6 text-slate-400">Nowe dywidendy zapisuj w C5.9 income_events. Ten tab pokazuje starsze rekordy z tabeli dividends, żeby zachować kompatybilność.</p>
+              <Link href="/long-term/income" className="mt-5 inline-flex items-center gap-2 rounded-2xl bg-violet-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-950/40 transition hover:bg-violet-400">
+                <Plus size={16} /> Przejdź do Dochodów
+              </Link>
             </Card>
             <Card>
               <h3 className="text-lg font-bold text-white">Dywidendy miesięczne</h3>
