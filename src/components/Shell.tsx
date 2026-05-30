@@ -7,6 +7,7 @@ import clsx from 'clsx'
 import { AuthGate, AuthStatus } from '@/components/AuthGate'
 import {
   AlertTriangle,
+  Banknote,
   BarChart3,
   Bell,
   BrainCircuit,
@@ -32,6 +33,7 @@ const nav = [
     children: [
       { href: '/long-term', label: 'Pozycje', icon: Wallet },
       { href: '/long-term/transactions', label: 'Transakcje', icon: Plus },
+      { href: '/long-term/income', label: 'Dochody', icon: Banknote },
       { href: '/long-term/bonds', label: 'Obligacje EDO', icon: Landmark },
       { href: '/long-term/intelligence', label: 'Intelligence', icon: BrainCircuit },
     ],

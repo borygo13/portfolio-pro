@@ -1,11 +1,13 @@
 import type {
   CashLedgerEntry,
   DividendRecord,
+  IncomeEvent,
   MarketPriceHistoryPoint,
   PortfolioSnapshot,
   SupportedCashCurrency,
   Transaction,
 } from '@/lib/supabase/portfolio'
+import { incomeNetBaseOrNull } from '@/lib/income-engine'
 import { transactionFeeBase, transactionNetBaseOrNull } from '@/lib/transaction-math'
 
 export type ReturnMetric = {
@@ -137,6 +139,7 @@ type EngineInput = {
   snapshots: PortfolioSnapshot[]
   cashEntries: CashLedgerEntry[]
   dividends: DividendRecord[]
+  incomeEvents?: IncomeEvent[]
   transactions: Transaction[]
   benchmarkHistory: MarketPriceHistoryPoint[]
   baseCurrency?: SupportedCashCurrency | string | null
@@ -287,6 +290,11 @@ function buildEvents(input: EngineInput) {
     if (supportedCurrency(dividend.currency) !== baseCurrency) continue
     const income = n(dividend.net_amount)
     if (income > 0) addEvent(events, dividend.payment_date, { income })
+  }
+
+  for (const incomeEvent of input.incomeEvents ?? []) {
+    const income = incomeNetBaseOrNull(incomeEvent)
+    if (income != null && income > 0) addEvent(events, incomeEvent.payment_date, { income })
   }
 
   for (const transaction of input.transactions) {

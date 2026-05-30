@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle2, Database, Landmark, Loader2, RefreshCw, Sh
 import { Shell, PageHeader, Card, StatCard, TrustBadge, PillButton } from '@/components/Shell'
 import { AllocationChart, AssetHistoryChart, EquityChart } from '@/components/Charts'
 import { PLN, PCT } from '@/lib/format'
+import { summarizeIncomeEvents } from '@/lib/income-engine'
 import { FX_PREVIOUS_LOOKBACK_DAYS } from '@/lib/market/fx'
 import { supabase } from '@/lib/supabase/client'
 import {
@@ -14,6 +15,7 @@ import {
   listAssets,
   listAssetPrices,
   listEdoBonds,
+  listIncomeEvents,
   listMarketPriceHistory,
   listPortfolioSnapshots,
   listTransactions,
@@ -21,6 +23,7 @@ import {
   type AssetPrice,
   type ChartRange,
   type EdoBond,
+  type IncomeEvent,
   type MarketPriceHistoryPoint,
   type Portfolio,
   type PortfolioSnapshot,
@@ -252,12 +255,17 @@ function refreshStatusLabel(status: PriceRefreshRun['status']) {
   return status
 }
 
+function currentYear() {
+  return new Date().getFullYear().toString()
+}
+
 export default function Dashboard() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
   const [assets, setAssets] = useState<Asset[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [prices, setPrices] = useState<AssetPrice[]>([])
   const [edoBonds, setEdoBonds] = useState<EdoBond[]>([])
+  const [incomeEvents, setIncomeEvents] = useState<IncomeEvent[]>([])
   const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([])
   const [latestRefreshRun, setLatestRefreshRun] = useState<PriceRefreshRun | null>(null)
   const [selectedAssetId, setSelectedAssetId] = useState('')
@@ -276,13 +284,14 @@ export default function Dashboard() {
       const { data } = await supabase.auth.getUser()
       if (!data.user) throw new Error('Brak aktywnej sesji użytkownika.')
       const defaultPortfolio = await getDefaultPortfolio(data.user)
-      const [assetList, txList, priceList, bondList, snapshotList, refreshRun] = await Promise.all([
+      const [assetList, txList, priceList, bondList, snapshotList, refreshRun, incomeList] = await Promise.all([
         listAssets(defaultPortfolio.id),
         listTransactions(defaultPortfolio.id),
         listAssetPrices(defaultPortfolio.id),
         listEdoBonds(defaultPortfolio.id),
         listPortfolioSnapshots(defaultPortfolio.id),
         getLatestPriceRefreshRun(defaultPortfolio.id),
+        listIncomeEvents(defaultPortfolio.id),
       ])
       setPortfolio(defaultPortfolio)
       setAssets(assetList)
@@ -291,6 +300,7 @@ export default function Dashboard() {
       setEdoBonds(bondList)
       setSnapshots(snapshotList)
       setLatestRefreshRun(refreshRun)
+      setIncomeEvents(incomeList)
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się pobrać danych dashboardu.')
     } finally {
@@ -330,6 +340,8 @@ export default function Dashboard() {
   const priceWarnings = useMemo(() => buildPriceWarnings(assets, prices), [assets, prices])
   const selectedAsset = useMemo(() => marketActivePositions.find((p) => p.asset.id === selectedAssetId)?.asset ?? null, [marketActivePositions, selectedAssetId])
   const assetHistoryCurve = useMemo(() => buildAssetHistoryCurve(assetHistory, selectedAsset, portfolio?.currency ?? 'PLN'), [assetHistory, selectedAsset, portfolio?.currency])
+  const incomeSummary = useMemo(() => summarizeIncomeEvents(incomeEvents, portfolio?.currency ?? 'PLN'), [incomeEvents, portfolio?.currency])
+  const latestIncomeEvents = useMemo(() => incomeEvents.slice(0, 3), [incomeEvents])
   const bondPnl = edoSummary.currentValueAfterTax - edoSummary.principal
 
   useEffect(() => {
@@ -539,12 +551,49 @@ export default function Dashboard() {
 
       <div className="mt-6 grid gap-6 2xl:grid-cols-[.75fr_1.25fr]">
         <Card>
-          <h3 className="text-lg font-bold text-white">Dywidendy miesięczne</h3>
-          <p className="mt-1 text-sm text-slate-500">Nie pokazujemy tu przykładowych dywidend jako realnego wyniku. Pełne podsumowanie dashboardowe będzie w C5.9.</p>
-          <div className="mt-5 rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-6 text-sm text-slate-400">
-            <p className="font-semibold text-white">Sekcja w budowie</p>
-            <p className="mt-2">Rekordy dywidend są dostępne w Intelligence, ale dashboard nie dolicza jeszcze osobnego realnego widoku dywidend.</p>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-lg font-bold text-white">Dochody z portfela</h3>
+              <p className="mt-1 text-sm text-slate-500">Tylko realne zdarzenia z income_events. Wartości dashboardu są w walucie portfela.</p>
+            </div>
+            <TrustBadge>C5.9</TrustBadge>
           </div>
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            <div className="rounded-2xl bg-emerald-500/10 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-emerald-200/70">Netto YTD {currentYear()}</p>
+              <p className="mt-2 text-2xl font-bold text-emerald-100">{PLN.format(incomeSummary.currentYearNetBase)}</p>
+            </div>
+            <div className="rounded-2xl bg-white/[0.04] p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Podatki YTD</p>
+              <p className="mt-2 text-2xl font-bold text-white">{PLN.format(incomeSummary.currentYearTaxBase)}</p>
+            </div>
+            <div className="rounded-2xl bg-white/[0.04] p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Netto all-time</p>
+              <p className="mt-2 text-2xl font-bold text-white">{PLN.format(incomeSummary.allTimeNetBase)}</p>
+            </div>
+            <div className="rounded-2xl bg-white/[0.04] p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Zdarzenia</p>
+              <p className="mt-2 text-2xl font-bold text-white">{incomeSummary.count}</p>
+            </div>
+          </div>
+          {incomeSummary.count === 0 ? (
+            <div className="mt-4 rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-4 text-sm text-slate-400">Brak dodanych dochodów. Dodaj pierwszą dywidendę w Long-term → Dochody.</div>
+          ) : incomeSummary.missingBaseCount > 0 ? (
+            <div className="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">{incomeSummary.missingBaseCount} zdarzeń nie ma wyceny PLN, więc nie wchodzi do sum dashboardu.</div>
+          ) : null}
+          {latestIncomeEvents.length > 0 ? (
+            <div className="mt-4 space-y-2">
+              {latestIncomeEvents.map((item) => (
+                <div key={item.id} className="flex items-center justify-between rounded-2xl bg-white/[0.03] px-3 py-2 text-sm">
+                  <div>
+                    <p className="font-semibold text-white">{item.assets?.symbol ?? 'Dochód'}</p>
+                    <p className="text-xs text-slate-500">{item.payment_date}</p>
+                  </div>
+                  <p className="font-semibold text-emerald-300">{item.net_amount_base == null ? 'brak PLN' : PLN.format(Number(item.net_amount_base))}</p>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </Card>
 
         <Card>

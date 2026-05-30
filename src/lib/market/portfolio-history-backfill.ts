@@ -1,3 +1,4 @@
+import { summarizeIncomeEvents } from '@/lib/income-engine'
 import { buildAllocationBreakdown, isMarketPricedAsset, num, summarizeCashLedger, summarizeDividends } from '@/lib/portfolio-intelligence'
 import { buildPositions, portfolioSummary, type AssetPrice } from '@/lib/position-engine'
 import { FX_PREVIOUS_LOOKBACK_DAYS, fxDaysBetween } from '@/lib/market/fx'
@@ -7,6 +8,7 @@ import type {
   CashLedgerEntry,
   DividendRecord,
   EdoBond,
+  IncomeEvent,
   Portfolio,
   PortfolioBenchmark,
   Transaction,
@@ -119,22 +121,25 @@ function bondPrincipal(bonds: EdoBond[], date: string) {
 }
 
 async function fetchEarliestActivityDate(supabase: ServerSupabase, portfolioId: string, endDate: string) {
-  const [transactionsRes, cashRes, dividendsRes, bondsRes] = await Promise.all([
+  const [transactionsRes, cashRes, dividendsRes, incomeRes, bondsRes] = await Promise.all([
     supabase.from('transactions').select('transaction_date').eq('portfolio_id', portfolioId).lte('transaction_date', endDate).order('transaction_date', { ascending: true }).limit(1),
     supabase.from('cash_ledger_entries').select('entry_date').eq('portfolio_id', portfolioId).lte('entry_date', endDate).order('entry_date', { ascending: true }).limit(1),
     supabase.from('dividends').select('payment_date').eq('portfolio_id', portfolioId).lte('payment_date', endDate).order('payment_date', { ascending: true }).limit(1),
+    supabase.from('income_events').select('payment_date').eq('portfolio_id', portfolioId).lte('payment_date', endDate).order('payment_date', { ascending: true }).limit(1),
     supabase.from('edo_bonds').select('purchase_date').eq('portfolio_id', portfolioId).order('purchase_date', { ascending: true }).limit(1),
   ])
 
   if (transactionsRes.error) throw new Error(`transactions: ${transactionsRes.error.message}`)
   if (cashRes.error) throw new Error(`cash_ledger_entries: ${cashRes.error.message}`)
   if (dividendsRes.error) throw new Error(`dividends: ${dividendsRes.error.message}`)
+  if (incomeRes.error) throw new Error(`income_events: ${incomeRes.error.message}`)
   if (bondsRes.error) throw new Error(`edo_bonds: ${bondsRes.error.message}`)
 
   return earliestDate([
     ...((transactionsRes.data ?? []) as { transaction_date: string | null }[]).map((item) => item.transaction_date),
     ...((cashRes.data ?? []) as { entry_date: string | null }[]).map((item) => item.entry_date),
     ...((dividendsRes.data ?? []) as { payment_date: string | null }[]).map((item) => item.payment_date),
+    ...((incomeRes.data ?? []) as { payment_date: string | null }[]).map((item) => item.payment_date),
     ...((bondsRes.data ?? []) as { purchase_date: string | null }[]).map((item) => item.purchase_date),
   ])
 }
@@ -223,6 +228,7 @@ async function fetchInputs(supabase: ServerSupabase, portfolioId: string, startD
     transactionsRes,
     cashRes,
     dividendsRes,
+    incomeRes,
     bondsRes,
     benchmarkRes,
     existingSnapshotRes,
@@ -234,6 +240,7 @@ async function fetchInputs(supabase: ServerSupabase, portfolioId: string, startD
     supabase.from('transactions').select(BACKFILL_TRANSACTION_SELECT).eq('portfolio_id', portfolioId).lte('transaction_date', endDate).limit(50000),
     supabase.from('cash_ledger_entries').select('id,portfolio_id,entry_type,amount,currency,entry_date,note,created_at,updated_at').eq('portfolio_id', portfolioId).lte('entry_date', endDate).limit(50000),
     supabase.from('dividends').select('id,portfolio_id,asset_id,payment_date,gross_amount,tax_amount,net_amount,currency,note,created_at,updated_at').eq('portfolio_id', portfolioId).lte('payment_date', endDate).limit(50000),
+    supabase.from('income_events').select('id,user_id,portfolio_id,asset_id,income_type,broker,source,currency,gross_amount,withholding_tax,local_tax,other_fees,net_amount,fx_rate_to_base,fx_rate_date,fx_rate_source,base_currency,gross_amount_base,withholding_tax_base,local_tax_base,other_fees_base,net_amount_base,payment_date,ex_date,record_date,notes,created_at,updated_at').eq('portfolio_id', portfolioId).lte('payment_date', endDate).limit(50000),
     supabase.from('edo_bonds').select('id,portfolio_id,series,quantity,purchase_price,purchase_date,interest_first_year,inflation_margin,maturity_date,created_at').eq('portfolio_id', portfolioId).limit(5000),
     supabase.from('portfolio_benchmarks').select('portfolio_id,benchmark_asset_id,created_at,updated_at').eq('portfolio_id', portfolioId).maybeSingle(),
     supabase.from('portfolio_snapshots').select('snapshot_date').eq('portfolio_id', portfolioId).gte('snapshot_date', startDate).lte('snapshot_date', endDate).limit(10000),
@@ -246,6 +253,7 @@ async function fetchInputs(supabase: ServerSupabase, portfolioId: string, startD
   if (transactionsRes.error) throw new Error(`transactions: ${transactionsRes.error.message}`)
   if (cashRes.error) throw new Error(`cash_ledger_entries: ${cashRes.error.message}`)
   if (dividendsRes.error) throw new Error(`dividends: ${dividendsRes.error.message}`)
+  if (incomeRes.error) throw new Error(`income_events: ${incomeRes.error.message}`)
   if (bondsRes.error) throw new Error(`edo_bonds: ${bondsRes.error.message}`)
   if (benchmarkRes.error) throw new Error(`portfolio_benchmarks: ${benchmarkRes.error.message}`)
   if (existingSnapshotRes.error) throw new Error(`portfolio_snapshots: ${existingSnapshotRes.error.message}`)
@@ -258,6 +266,7 @@ async function fetchInputs(supabase: ServerSupabase, portfolioId: string, startD
     transactions: (transactionsRes.data ?? []) as Transaction[],
     cashEntries: (cashRes.data ?? []) as CashLedgerEntry[],
     dividends: (dividendsRes.data ?? []) as DividendRecord[],
+    incomeEvents: (incomeRes.data ?? []) as IncomeEvent[],
     bonds: (bondsRes.data ?? []) as EdoBond[],
     benchmark: benchmarkRes.data as PortfolioBenchmark | null,
     existingSnapshotDates: new Set((existingSnapshotRes.data ?? []).map((row: { snapshot_date: string }) => row.snapshot_date)),
@@ -345,11 +354,12 @@ export async function runPortfolioHistoryBackfill(options: {
       const transactions = inputs.transactions.filter((item) => item.transaction_date <= date)
       const cashEntries = inputs.cashEntries.filter((item) => item.entry_date <= date)
       const dividends = inputs.dividends.filter((item) => item.payment_date <= date)
+      const incomeEvents = inputs.incomeEvents.filter((item) => item.payment_date <= date)
       const edoPrincipal = bondPrincipal(inputs.bonds, date)
 
-      if (transactions.length === 0 && cashEntries.length === 0 && dividends.length === 0 && edoPrincipal <= 0) {
+      if (transactions.length === 0 && cashEntries.length === 0 && dividends.length === 0 && incomeEvents.length === 0 && edoPrincipal <= 0) {
         skippedNoActivityDays += 1
-        if (skippedDays.length < MAX_REPORTED_DAYS) skippedDays.push({ date, reason: 'No transactions, cash ledger entries, dividends, or bonds yet.' })
+        if (skippedDays.length < MAX_REPORTED_DAYS) skippedDays.push({ date, reason: 'No transactions, cash ledger entries, income events, dividends, or bonds yet.' })
         continue
       }
 
@@ -377,13 +387,14 @@ export async function runPortfolioHistoryBackfill(options: {
       const summary = portfolioSummary(positions)
       const cashSummary = summarizeCashLedger(cashEntries, baseCurrency)
       const dividendSummary = summarizeDividends(dividends, baseCurrency)
+      const incomeSummary = summarizeIncomeEvents(incomeEvents, baseCurrency)
       const transactionFees = transactions.reduce((sum, transaction) => sum + transactionFeeBase(transaction), 0)
       const positionsValue = summary.totalValue
       const cashValue = cashSummary.cashBalanceBase
       const totalValue = positionsValue + edoPrincipal + cashValue
       const feesValue = cashSummary.feesBase + transactionFees
-      const taxesValue = cashSummary.taxesBase + dividendSummary.taxBase
-      const realizedPnl = summary.realizedPnl + dividendSummary.netBase - cashSummary.feesBase - cashSummary.taxesBase
+      const taxesValue = cashSummary.taxesBase + dividendSummary.taxBase + incomeSummary.taxBase
+      const realizedPnl = summary.realizedPnl + dividendSummary.netBase + incomeSummary.netBase - cashSummary.feesBase - cashSummary.taxesBase
       const unrealizedPnl = summary.unrealizedPnl
       const contributionFallback = summary.investedCost + edoPrincipal
       const hasCashLedgerFlow = cashEntries.some((entry) => entry.entry_type === 'deposit' || entry.entry_type === 'withdrawal')
@@ -404,7 +415,7 @@ export async function runPortfolioHistoryBackfill(options: {
         total_pnl: realizedPnl + unrealizedPnl,
         net_cash_flow: cashSummary.netCashFlowBase !== 0 ? cashSummary.netCashFlowBase : contribution,
         contribution,
-        dividends_value: dividendSummary.netBase,
+        dividends_value: dividendSummary.netBase + incomeSummary.netBase,
         fees_value: feesValue,
         taxes_value: taxesValue,
         allocation_breakdown: buildAllocationBreakdown(positions, edoPrincipal, cashValue, totalValue),

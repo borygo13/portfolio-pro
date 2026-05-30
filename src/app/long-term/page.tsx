@@ -6,6 +6,7 @@ import { Shell, PageHeader, Card, StatCard, TrustBadge, FeatureNote } from '@/co
 import { AllocationChart } from '@/components/Charts'
 import { PLN, PLN2, PCT } from '@/lib/format'
 import { BASE_CURRENCY } from '@/lib/currency'
+import { summarizeIncomeByAsset } from '@/lib/income-engine'
 import {
   instrumentMeta,
   instrumentProviderCandidates,
@@ -20,6 +21,7 @@ import {
   getDefaultPortfolio,
   listAssets,
   listAssetPrices,
+  listIncomeEvents,
   listInstrumentCatalog,
   listTransactions,
   updateAsset,
@@ -27,6 +29,7 @@ import {
   type Asset,
   type AssetPrice,
   type AssetType,
+  type IncomeEvent,
   type InstrumentCatalogRow,
   type Portfolio,
   type Transaction,
@@ -109,6 +112,7 @@ export default function LongTermPage() {
   const [assets, setAssets] = useState<Asset[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [prices, setPrices] = useState<AssetPrice[]>([])
+  const [incomeEvents, setIncomeEvents] = useState<IncomeEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [savingPrice, setSavingPrice] = useState<string | null>(null)
   const [refreshingPrices, setRefreshingPrices] = useState(false)
@@ -136,6 +140,10 @@ export default function LongTermPage() {
   const readiness = useMemo(() => instrumentReadiness(formInstrument(assetForm, selectedPreset), portfolio?.currency ?? 'PLN'), [assetForm, selectedPreset, portfolio?.currency])
   const providerCandidates = useMemo(() => instrumentProviderCandidates(formInstrument(assetForm, selectedPreset)).slice(0, 8), [assetForm, selectedPreset])
   const historyFetchEnabled = !editingAssetId && fetchHistoryAfterAdd && isHistoryEligible(assetForm.asset_type)
+  const incomeByAsset = useMemo(() => {
+    const rows = summarizeIncomeByAsset(incomeEvents)
+    return new Map(rows.map((row) => [row.assetId, row]))
+  }, [incomeEvents])
 
   async function loadData() {
     setLoading(true)
@@ -144,15 +152,17 @@ export default function LongTermPage() {
       const { data } = await supabase.auth.getUser()
       if (!data.user) throw new Error('Brak aktywnej sesji użytkownika.')
       const defaultPortfolio = await getDefaultPortfolio(data.user)
-      const [assetList, txList, priceList] = await Promise.all([
+      const [assetList, txList, priceList, incomeList] = await Promise.all([
         listAssets(defaultPortfolio.id),
         listTransactions(defaultPortfolio.id),
         listAssetPrices(defaultPortfolio.id),
+        listIncomeEvents(defaultPortfolio.id),
       ])
       setPortfolio(defaultPortfolio)
       setAssets(assetList)
       setTransactions(txList)
       setPrices(priceList)
+      setIncomeEvents(incomeList)
       setPriceDrafts(Object.fromEntries(priceList.map((p) => [p.asset_id, String(p.price)])))
 
       try {
@@ -682,12 +692,15 @@ export default function LongTermPage() {
                       <th className="p-4 text-right">Koszt PLN</th>
                       <th className="p-4 text-right">P/L unreal. PLN</th>
                       <th className="p-4 text-right">P/L real. PLN</th>
+                      <th className="p-4 text-right">Dochód PLN</th>
                       <th className="p-4 text-right">Zwrot</th>
                       <th className="p-4 text-right">Udział / target</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {positions.map((p) => (
+                    {positions.map((p) => {
+                      const income = incomeByAsset.get(p.asset.id)
+                      return (
                       <tr key={p.asset.id} className="border-t border-white/10 text-slate-300 transition hover:bg-white/[0.03]">
                         <td className="p-4">
                           <div className="font-semibold text-white">{p.asset.symbol}</div>
@@ -708,10 +721,15 @@ export default function LongTermPage() {
                         <td className="p-4 text-right text-slate-400">{PLN.format(p.remainingCost)}</td>
                         <td className={`p-4 text-right ${p.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{PLN.format(p.unrealizedPnl)}</td>
                         <td className={`p-4 text-right ${p.realizedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{PLN.format(p.realizedPnl)}</td>
+                        <td className="p-4 text-right">
+                          <div className="font-semibold text-emerald-300">{income ? PLN.format(income.netBase) : '—'}</div>
+                          {income ? <div className="text-xs text-slate-500">{income.count} zdarzeń</div> : null}
+                        </td>
                         <td className={`p-4 text-right font-semibold ${p.returnPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{PCT.format(p.returnPct)}</td>
                         <td className="p-4 text-right text-slate-400">{PCT.format(p.allocationPct)} / {(p.targetAllocation || 0).toFixed(1)}%</td>
                       </tr>
-                    ))}
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>

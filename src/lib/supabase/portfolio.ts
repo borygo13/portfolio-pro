@@ -1,5 +1,6 @@
 import type { User } from '@supabase/supabase-js'
 import { BASE_CURRENCY } from '@/lib/currency'
+import { calculateIncomeAmounts, type IncomeType } from '@/lib/income-engine'
 import { searchInstrumentCatalogRows } from '@/lib/instruments/search'
 import { FX_PREVIOUS_LOOKBACK_DAYS, fxAddDays, fxDaysBetween, normalizeCurrencyCode } from '@/lib/market/fx'
 import { calculateTransactionAmounts } from '@/lib/transaction-math'
@@ -848,6 +849,134 @@ export async function createDividend(portfolioId: string, input: CreateDividendI
 export async function deleteDividend(id: string) {
   const { error } = await supabase.from('dividends').delete().eq('id', id)
   if (error) throw new Error(`Nie udało się usunąć dywidendy: ${error.message}`)
+}
+
+export type IncomeEvent = {
+  id: string
+  user_id: string
+  portfolio_id: string
+  asset_id: string | null
+  income_type: IncomeType
+  broker: string | null
+  source: string | null
+  currency: string
+  gross_amount: number
+  withholding_tax: number
+  local_tax: number
+  other_fees: number
+  net_amount: number
+  fx_rate_to_base: number | null
+  fx_rate_date: string | null
+  fx_rate_source: string | null
+  base_currency: string
+  gross_amount_base: number | null
+  withholding_tax_base: number | null
+  local_tax_base: number | null
+  other_fees_base: number | null
+  net_amount_base: number | null
+  payment_date: string
+  ex_date: string | null
+  record_date: string | null
+  notes: string | null
+  created_at: string
+  updated_at: string | null
+  assets?: Pick<Asset, 'symbol' | 'name' | 'asset_type' | 'currency'> | null
+}
+
+export type CreateIncomeEventInput = {
+  income_type?: IncomeType
+  asset_id?: string | null
+  broker?: string | null
+  source?: string | null
+  currency: string
+  gross_amount: number
+  withholding_tax?: number | null
+  local_tax?: number | null
+  other_fees?: number | null
+  fx_rate_to_base?: number | null
+  fx_rate_date?: string | null
+  fx_rate_source?: string | null
+  base_currency?: string | null
+  payment_date: string
+  ex_date?: string | null
+  record_date?: string | null
+  notes?: string | null
+}
+
+const INCOME_EVENT_SELECT = 'id,user_id,portfolio_id,asset_id,income_type,broker,source,currency,gross_amount,withholding_tax,local_tax,other_fees,net_amount,fx_rate_to_base,fx_rate_date,fx_rate_source,base_currency,gross_amount_base,withholding_tax_base,local_tax_base,other_fees_base,net_amount_base,payment_date,ex_date,record_date,notes,created_at,updated_at,assets(symbol,name,asset_type,currency)'
+
+export async function listIncomeEvents(portfolioId: string): Promise<IncomeEvent[]> {
+  const { data, error } = await supabase
+    .from('income_events')
+    .select(INCOME_EVENT_SELECT)
+    .eq('portfolio_id', portfolioId)
+    .order('payment_date', { ascending: false })
+    .order('created_at', { ascending: false })
+
+  if (error) throw new Error(`Nie udało się pobrać dochodów: ${error.message}`)
+  return (data ?? []) as unknown as IncomeEvent[]
+}
+
+export async function createIncomeEvent(portfolioId: string, input: CreateIncomeEventInput): Promise<IncomeEvent> {
+  const { data: userData, error: userError } = await supabase.auth.getUser()
+  if (userError || !userData.user) throw new Error('Brak aktywnej sesji użytkownika.')
+  if (!input.payment_date) throw new Error('Wybierz datę wypłaty dochodu.')
+
+  const amounts = calculateIncomeAmounts({
+    incomeType: input.income_type ?? 'DIVIDEND',
+    grossAmount: input.gross_amount,
+    withholdingTax: input.withholding_tax,
+    localTax: input.local_tax,
+    otherFees: input.other_fees,
+    currency: input.currency,
+    baseCurrency: input.base_currency ?? BASE_CURRENCY,
+    fxRateToBase: input.fx_rate_to_base,
+    fxRateDate: input.fx_rate_date,
+    fxRateSource: input.fx_rate_source,
+  })
+
+  const payload = {
+    user_id: userData.user.id,
+    portfolio_id: portfolioId,
+    asset_id: input.asset_id || null,
+    income_type: amounts.incomeType,
+    broker: input.broker?.trim() || null,
+    source: input.source?.trim() || 'manual',
+    currency: amounts.currency,
+    gross_amount: amounts.grossAmount,
+    withholding_tax: amounts.withholdingTax,
+    local_tax: amounts.localTax,
+    other_fees: amounts.otherFees,
+    net_amount: amounts.netAmount,
+    fx_rate_to_base: amounts.fxRateToBase,
+    fx_rate_date: amounts.fxRateDate,
+    fx_rate_source: amounts.fxRateSource,
+    base_currency: amounts.baseCurrency,
+    gross_amount_base: amounts.grossAmountBase,
+    withholding_tax_base: amounts.withholdingTaxBase,
+    local_tax_base: amounts.localTaxBase,
+    other_fees_base: amounts.otherFeesBase,
+    net_amount_base: amounts.netAmountBase,
+    payment_date: input.payment_date,
+    ex_date: input.ex_date || null,
+    record_date: input.record_date || null,
+    notes: input.notes?.trim() || null,
+    updated_at: new Date().toISOString(),
+  }
+
+  const { data, error } = await supabase
+    .from('income_events')
+    .insert(payload)
+    .select(INCOME_EVENT_SELECT)
+    .single()
+
+  if (error) throw new Error(`Nie udało się dodać dochodu: ${error.message}`)
+  return data as unknown as IncomeEvent
+}
+
+export async function deleteIncomeEvent(id: string) {
+  const { error } = await supabase.from('income_events').delete().eq('id', id)
+  if (error) throw new Error(`Nie udało się usunąć dochodu: ${error.message}`)
 }
 
 export type PortfolioBenchmark = {

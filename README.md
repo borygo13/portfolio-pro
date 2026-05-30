@@ -523,6 +523,70 @@ select
 from transactions;
 ```
 
+### Stage C5.9 - Dividend / Income Engine
+
+Apply the additive migration by running `supabase/stage-c5-9-income-events.sql` in Supabase SQL Editor before deploying the C5.9 app build.
+
+C5.9 adds a separate `income_events` table for manual dividend/income tracking. Dividends are not BUY/SELL transactions and do not change position quantity. The legacy `dividends` table remains intact for older C5 records, while new dividend UI writes to `income_events`.
+
+Income amount rules:
+
+- Source currency is primary for each income event, for example `10 USD` dividend from AAPL or `10 EUR` from IUSQ.DE.
+- Portfolio/dashboard summaries use base currency, usually PLN, only when a safe FX conversion exists.
+- PLN income uses FX = 1 only when source and base currency are both PLN.
+- USD/EUR/GBP/CHF income never fakes FX = 1. If FX is missing, the source-currency event can still be saved and PLN/base values remain unavailable.
+- Net amount is calculated as gross minus withholding tax, local tax and other fees.
+
+FX behavior:
+
+- The income form reuses the existing transaction FX endpoint and C5.6c fallback rules.
+- Exact payment-date FX is preferred.
+- If exact FX is unavailable, the latest previous available FX inside the safe lookback window may be used.
+- If no FX is found, dashboard/income summaries show a limited-data note instead of mixing source currency into PLN totals.
+
+UI behavior:
+
+- Long-term → Dochody lets you add manual dividends, review history, see monthly income and income by asset.
+- Dashboard income cards read real `income_events` only. No demo dividend values are mixed into real totals.
+- Intelligence still shows the older `dividends` compatibility tab and links new dividend entry to Long-term → Dochody.
+
+Deployment notes:
+
+- C5.9 does not add a new required environment variable.
+- Safe deployment order: apply `supabase/stage-c5-9-income-events.sql` in Supabase first, then deploy the C5.9 app build to Vercel.
+- Browser code still only uses `NEXT_PUBLIC_*` Supabase values. `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `EODHD_API_KEY` and future broker/API secrets must stay server-side.
+- Broker import remains C6. Trading journal, leveraged products, CFDs, futures and Bybit are still outside this long-term income engine.
+
+Useful income verification queries:
+
+```sql
+select
+  payment_date,
+  income_type,
+  currency,
+  gross_amount,
+  withholding_tax,
+  local_tax,
+  other_fees,
+  net_amount,
+  fx_rate_to_base,
+  fx_rate_date,
+  base_currency,
+  net_amount_base
+from income_events
+order by payment_date desc, created_at desc
+limit 20;
+
+select
+  base_currency,
+  count(*) as events,
+  sum(net_amount_base) as net_base,
+  count(*) filter (where net_amount_base is null) as missing_base
+from income_events
+group by base_currency
+order by base_currency;
+```
+
 ### SQL verification katalogu
 
 ```sql
