@@ -5,6 +5,7 @@ import { CheckCircle2, Database, Loader2, Plus, RefreshCw, Save, Search, Target,
 import { Shell, PageHeader, Card, StatCard, TrustBadge, FeatureNote } from '@/components/Shell'
 import { AllocationChart } from '@/components/Charts'
 import { PLN, PLN2, PCT } from '@/lib/format'
+import { BASE_CURRENCY } from '@/lib/currency'
 import {
   instrumentMeta,
   instrumentProviderCandidates,
@@ -365,9 +366,10 @@ export default function LongTermPage() {
     try {
       const price = Number(String(priceDrafts[asset.id] ?? '').replace(',', '.'))
       if (!Number.isFinite(price) || price < 0) throw new Error('Cena musi być poprawną liczbą dodatnią albo zerem.')
-      const saved = await upsertAssetPrice(portfolio.id, asset.id, price, asset.currency ?? portfolio.currency ?? 'PLN')
+      const baseCurrency = portfolio.currency ?? BASE_CURRENCY
+      const saved = await upsertAssetPrice(portfolio.id, asset.id, price, baseCurrency)
       setPrices((current) => [saved, ...current.filter((p) => p.asset_id !== asset.id)])
-      setSuccess(`Cena ${asset.symbol} zapisana.`)
+      setSuccess(`Cena ${asset.symbol} zapisana jako wycena w ${baseCurrency}.`)
     } catch (err: any) {
       setError(err?.message ?? 'Nie udało się zapisać ceny.')
     } finally {
@@ -431,9 +433,9 @@ export default function LongTermPage() {
       />
 
       <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard icon={Wallet} label="Wartość pozycji" value={PLN.format(summary.totalValue)} sub={`${summary.openPositions} aktywnych pozycji`} tone="cyan" />
-        <StatCard icon={Database} label="Koszt otwarty" value={PLN.format(summary.remainingCost)} sub={`Wpłacone w pozycje: ${PLN.format(summary.investedCost)}`} />
-        <StatCard icon={TrendingUp} label="P/L łączny" value={PLN.format(summary.totalPnl)} sub={`${PCT.format(summary.returnPct)} względem kosztu`} tone={summary.totalPnl >= 0 ? 'emerald' : 'red'} />
+        <StatCard icon={Wallet} label="Wartość pozycji" value={PLN.format(summary.totalValue)} sub={summary.openPositions > 0 ? `${summary.openPositions} aktywnych pozycji · wycena w PLN` : 'Brak aktywnych pozycji'} tone="cyan" />
+        <StatCard icon={Database} label="Koszt otwarty" value={PLN.format(summary.remainingCost)} sub={summary.investedCost > 0 ? `Wpłacone w pozycje: ${PLN.format(summary.investedCost)}` : 'Dodaj transakcję, żeby policzyć koszt'} />
+        <StatCard icon={TrendingUp} label="P/L łączny" value={PLN.format(summary.totalPnl)} sub={summary.remainingCost > 0 ? `${PCT.format(summary.returnPct)} względem kosztu` : 'Za mało danych kosztowych'} tone={summary.totalPnl >= 0 ? 'emerald' : 'red'} />
         <StatCard icon={Target} label="Rebalancing" value={summary.rebalance?.asset.symbol ?? '—'} sub={summary.rebalance ? `Brakuje ${PCT.format(Math.max(summary.rebalance.allocationDiff, 0))}` : 'dodaj targety'} tone="violet" />
       </div>
 
@@ -648,7 +650,7 @@ export default function LongTermPage() {
             <div className="mb-5 flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-lg font-bold text-white">Tabela pozycji</h3>
-                <p className="mt-1 text-sm text-slate-500">Pozycje liczone są z transakcji. Auto ceny pobiera rynek, ręczna cena zostaje jako awaryjna korekta.</p>
+                <p className="mt-1 text-sm text-slate-500">Pozycje liczone są z transakcji. Auto ceny pobiera rynek, a ręczna cena w tej tabeli jest awaryjną wyceną w PLN/walucie portfela.</p>
               </div>
               <div className="flex items-center gap-2">
                 <button onClick={refreshMarketPrices} disabled={refreshingPrices || loading || assets.length === 0} className="inline-flex items-center gap-2 rounded-2xl bg-violet-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-950/40 transition hover:bg-violet-400 disabled:opacity-60" title="Pobierz ceny automatycznie">
@@ -674,12 +676,12 @@ export default function LongTermPage() {
                     <tr>
                       <th className="p-4 text-left">Aktywo</th>
                       <th className="p-4 text-right">Ilość</th>
-                      <th className="p-4 text-right">Śr. cena</th>
-                      <th className="p-4 text-right">Cena teraz</th>
-                      <th className="p-4 text-right">Wartość</th>
-                      <th className="p-4 text-right">Koszt</th>
-                      <th className="p-4 text-right">P/L unreal.</th>
-                      <th className="p-4 text-right">P/L real.</th>
+                      <th className="p-4 text-right">Śr. cena PLN</th>
+                      <th className="p-4 text-right">Cena teraz PLN</th>
+                      <th className="p-4 text-right">Wartość PLN</th>
+                      <th className="p-4 text-right">Koszt PLN</th>
+                      <th className="p-4 text-right">P/L unreal. PLN</th>
+                      <th className="p-4 text-right">P/L real. PLN</th>
                       <th className="p-4 text-right">Zwrot</th>
                       <th className="p-4 text-right">Udział / target</th>
                     </tr>
@@ -690,12 +692,13 @@ export default function LongTermPage() {
                         <td className="p-4">
                           <div className="font-semibold text-white">{p.asset.symbol}</div>
                           <div className="text-xs text-slate-500">{p.asset.name} · {p.asset.asset_type}</div>
+                          {!p.baseCostComplete ? <div className="mt-1 text-xs font-semibold text-amber-200">Wycena ograniczona: brak PLN/FX dla części transakcji</div> : null}
                         </td>
                         <td className="p-4 text-right text-white">{p.quantity.toLocaleString('pl-PL', { maximumFractionDigits: 6 })}</td>
                         <td className="p-4 text-right text-slate-400">{PLN2.format(p.avgPrice)}</td>
                         <td className="p-4 text-right">
                           <div className="flex justify-end gap-2">
-                            <input value={priceDrafts[p.asset.id] ?? (p.currentPrice ? String(Number(p.currentPrice.toFixed(4))) : '')} onChange={(e) => setPriceDrafts((d) => ({ ...d, [p.asset.id]: e.target.value }))} className="input h-10 w-28 px-3 py-2 text-right" inputMode="decimal" placeholder="cena" />
+                            <input value={priceDrafts[p.asset.id] ?? (p.currentPrice ? String(Number(p.currentPrice.toFixed(4))) : '')} onChange={(e) => setPriceDrafts((d) => ({ ...d, [p.asset.id]: e.target.value }))} className="input h-10 w-28 px-3 py-2 text-right" inputMode="decimal" placeholder="PLN" />
                             <button onClick={() => savePrice(p.asset)} className="rounded-xl bg-white/10 px-3 text-slate-200 hover:bg-white/15" title="Zapisz cenę">
                               {savingPrice === p.asset.id ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
                             </button>
@@ -725,7 +728,9 @@ export default function LongTermPage() {
             <p className="mb-4 text-sm text-slate-500">Udział liczony z aktualnej wartości pozycji.</p>
             <AllocationChart data={allocation} total={summary.totalValue} />
             <div className="space-y-3">
-              {positions.filter((p) => p.currentValue > 0).map((p) => (
+              {positions.filter((p) => p.currentValue > 0).length === 0 ? (
+                <div className="rounded-2xl bg-white/[0.03] px-3 py-3 text-sm text-slate-500">Brak aktywnej wyceny. Dodaj transakcję i cenę rynkową albo uruchom backfill.</div>
+              ) : positions.filter((p) => p.currentValue > 0).map((p) => (
                 <div key={p.asset.id} className="flex items-center justify-between rounded-2xl bg-white/[0.03] px-3 py-2 text-sm">
                   <span className="font-semibold text-white">{p.asset.symbol}</span>
                   <span className="text-slate-400">{PCT.format(p.allocationPct)}</span>

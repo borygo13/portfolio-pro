@@ -17,6 +17,7 @@ export const PCT = new Intl.NumberFormat('pl-PL', {
 })
 
 export function formatCurrencyValue(value: number, currency = 'PLN', maximumFractionDigits = 2) {
+  if (!Number.isFinite(value)) return '—'
   const code = (currency || 'PLN').toUpperCase()
   try {
     return new Intl.NumberFormat('pl-PL', {

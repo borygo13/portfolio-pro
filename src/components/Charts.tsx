@@ -138,6 +138,7 @@ export function EquityChart({ data, range = 'MAX' }: { data: ({ date?: string; m
   const chartData = data.map((item) => ({ ...item, date: item.date ?? item.month ?? '' }))
   const axisRange = effectiveAxisRange(chartData, range)
   const axisTicks = axisDateTicks(chartData, axisRange)
+  const hasBenchmark = chartData.some((item) => typeof item.benchmark === 'number' && Number.isFinite(item.benchmark))
 
   return (
     <ResponsiveContainer width="100%" height={310}>
@@ -154,7 +155,7 @@ export function EquityChart({ data, range = 'MAX' }: { data: ({ date?: string; m
         <Tooltip formatter={(v) => PLN.format(Number(v))} labelFormatter={fullDateLabel} contentStyle={tooltip} labelStyle={tooltipText} itemStyle={tooltipText} />
         <Area type="monotone" dataKey="portfolio" name="Portfel" stroke="#8b5cf6" strokeWidth={3} fill="url(#portfolioGradient)" />
         <Line type="monotone" dataKey="contribution" name="Wkład" stroke="#94a3b8" strokeWidth={2} dot={false} strokeDasharray="5 5" />
-        <Line type="monotone" dataKey="benchmark" name="Benchmark" stroke="#06b6d4" strokeWidth={2} dot={false} />
+        {hasBenchmark ? <Line type="monotone" dataKey="benchmark" name="Benchmark" stroke="#06b6d4" strokeWidth={2} dot={false} /> : null}
       </AreaChart>
     </ResponsiveContainer>
   )
@@ -183,7 +184,7 @@ function AssetHistoryTooltip({ active, payload, label }: { active?: boolean; pay
   const fxDate = point.fxRateDate ?? point.date ?? label
   const fxFallback = point.fxFallbackDays != null && point.fxFallbackDays > 0
   const fxNote = hasBaseEstimate && point.fxRateToBase
-    ? `FX: 1 ${currency} ≈ ${point.fxRateToBase.toLocaleString('pl-PL', { maximumFractionDigits: 4 })} ${baseCurrency} on ${fullDateLabel(fxDate)}${fxFallback ? ' (previous available)' : ''}`
+    ? `Kurs FX: 1 ${currency} ≈ ${point.fxRateToBase.toLocaleString('pl-PL', { maximumFractionDigits: 4 })} ${baseCurrency} z ${fullDateLabel(fxDate)}${fxFallback ? ' (ostatni dostępny)' : ''}`
     : null
 
   return (
@@ -191,7 +192,7 @@ function AssetHistoryTooltip({ active, payload, label }: { active?: boolean; pay
       <p className="font-semibold text-slate-200">{fullDateLabel(point.date ?? label)}</p>
       <p className="text-cyan-100">Cena: {formatCurrencyValue(point.price, currency, 2)}</p>
       {hasBaseEstimate ? <p className="text-slate-300">≈ {formatCurrencyValue(point.basePrice ?? 0, baseCurrency, 2)}</p> : null}
-      {point.fxMissing ? <p className="text-amber-100">{baseCurrency} estimate unavailable: missing FX for this date.</p> : null}
+      {point.fxMissing ? <p className="text-amber-100">Wycena {baseCurrency} niedostępna: brak FX dla tej daty.</p> : null}
       {fxNote ? <p className="text-xs text-slate-500">{fxNote}</p> : null}
     </div>
   )

@@ -146,11 +146,11 @@ type CsvImportResult = {
 }
 
 const tabs: { id: TabId; label: string }[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'cash', label: 'Cash' },
-  { id: 'dividends', label: 'Dividends' },
+  { id: 'overview', label: 'Przegląd' },
+  { id: 'cash', label: 'Gotówka' },
+  { id: 'dividends', label: 'Dywidendy' },
   { id: 'benchmark', label: 'Benchmark' },
-  { id: 'allocation', label: 'Allocation' },
+  { id: 'allocation', label: 'Alokacja' },
   { id: 'backfill', label: 'Backfill' },
 ]
 
@@ -174,7 +174,7 @@ function asCurrency(value: string | null | undefined): SupportedCashCurrency {
 }
 
 function formatPct(value: number | null) {
-  return value == null ? '—' : PCT.format(value)
+  return value == null || !Number.isFinite(value) ? '—' : PCT.format(value)
 }
 
 function formatDate(value: string) {
@@ -194,9 +194,9 @@ function diagnosticCount(count: number, startDate: string | null | undefined, en
 }
 
 function confidenceLabel(value: 'high' | 'limited' | 'low' | undefined) {
-  if (value === 'high') return 'High confidence'
-  if (value === 'limited') return 'Limited'
-  return 'Low confidence'
+  if (value === 'high') return 'Wysoka pewność'
+  if (value === 'limited') return 'Ograniczone dane'
+  return 'Niska pewność'
 }
 
 function confidenceTone(value: 'high' | 'limited' | 'low' | undefined) {
@@ -206,9 +206,9 @@ function confidenceTone(value: 'high' | 'limited' | 'low' | undefined) {
 }
 
 function qualityLabel(value: MarketPriceDiagnostics['quality'] | undefined) {
-  if (value === 'ready') return 'Ready'
-  if (value === 'limited') return 'Limited'
-  return 'Missing'
+  if (value === 'ready') return 'Gotowe'
+  if (value === 'limited') return 'Ograniczone'
+  return 'Braki danych'
 }
 
 function qualityTone(value: MarketPriceDiagnostics['quality'] | undefined) {
@@ -224,7 +224,7 @@ function directionLabel(value: string) {
 }
 
 function metricOrReason(value: number | null, reason: string | null | undefined) {
-  return value == null ? reason ?? 'Limited data' : formatPct(value)
+  return value == null ? reason ?? 'Za mało danych' : formatPct(value)
 }
 
 function returnMetricValue(metric: ReturnMetric) {
@@ -232,7 +232,7 @@ function returnMetricValue(metric: ReturnMetric) {
 }
 
 function returnMetricSub(metric: ReturnMetric, fallback = 'true return engine') {
-  if (!metric.available) return metric.reason ?? 'Limited data'
+  if (!metric.available) return metric.reason ?? 'Za mało danych'
   const suffix = metric.confidence && metric.confidence !== 'high' ? ` · ${confidenceLabel(metric.confidence)}` : ''
   if (metric.startDate && metric.endDate) return `${formatDate(metric.startDate)} → ${formatDate(metric.endDate)}${suffix}`
   return `${fallback}${suffix}`
@@ -246,8 +246,8 @@ function returnMetricTone(metric: ReturnMetric, positiveIsGood = true) {
 
 function recoveryMetricValue(metric: ReturnMetric) {
   if (!metric.available || metric.value == null) return '—'
-  if (metric.value === 0) return 'Recovered'
-  return `${metric.value.toFixed(1)} mo`
+  if (metric.value === 0) return 'Odzyskane'
+  return `${metric.value.toFixed(1)} mies.`
 }
 
 export default function PortfolioIntelligencePage() {
@@ -738,7 +738,7 @@ export default function PortfolioIntelligencePage() {
       <PageHeader
         eyebrow="Stage C5 · Portfolio Intelligence"
         title="Intelligence"
-        description="Cash ledger, dywidendy, TWR/MWR-style performance analytics, benchmark i drift alokacji. Metryki nadal oznaczają ograniczenia danych, gdy historia jest zbyt rzadka."
+        description="Cash ledger, dywidendy, metryki TWR/MWR, benchmark i drift alokacji. Gdy brakuje cen, FX albo snapshotów, pokazujemy ograniczenia zamiast sztucznych wyników."
       />
 
       {error ? <div className="mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
@@ -760,61 +760,61 @@ export default function PortfolioIntelligencePage() {
       {activeTab === 'overview' ? (
         <div className="space-y-6">
           <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-            <StatCard icon={Percent} label="TWR estimate" value={returnMetricValue(trueReturns.twrReturn)} sub={returnMetricSub(trueReturns.twrReturn, 'cash-flow neutral')} tone={returnMetricTone(trueReturns.twrReturn)} />
-            <StatCard icon={TrendingUp} label="CAGR" value={returnMetricValue(trueReturns.cagr)} sub={returnMetricSub(trueReturns.cagr, 'annualized TWR')} tone={returnMetricTone(trueReturns.cagr)} />
-            <StatCard icon={Scale} label="MWR approx." value={returnMetricValue(trueReturns.mwrApprox)} sub={returnMetricSub(trueReturns.mwrApprox, 'Modified Dietz estimate')} tone={returnMetricTone(trueReturns.mwrApprox)} />
-            <StatCard icon={BarChart3} label="Benchmark relative" value={returnMetricValue(trueReturns.benchmarkRelativeReturn)} sub={returnMetricSub(trueReturns.benchmarkRelativeReturn, 'common overlap')} tone={returnMetricTone(trueReturns.benchmarkRelativeReturn)} />
+            <StatCard icon={Percent} label="TWR szac." value={returnMetricValue(trueReturns.twrReturn)} sub={returnMetricSub(trueReturns.twrReturn, 'bez wpływu wpłat')} tone={returnMetricTone(trueReturns.twrReturn)} />
+            <StatCard icon={TrendingUp} label="CAGR" value={returnMetricValue(trueReturns.cagr)} sub={returnMetricSub(trueReturns.cagr, 'rocznie z TWR')} tone={returnMetricTone(trueReturns.cagr)} />
+            <StatCard icon={Scale} label="MWR approx." value={returnMetricValue(trueReturns.mwrApprox)} sub={returnMetricSub(trueReturns.mwrApprox, 'szacunek Modified Dietz')} tone={returnMetricTone(trueReturns.mwrApprox)} />
+            <StatCard icon={BarChart3} label="Względem benchmarku" value={returnMetricValue(trueReturns.benchmarkRelativeReturn)} sub={returnMetricSub(trueReturns.benchmarkRelativeReturn, 'wspólny zakres dat')} tone={returnMetricTone(trueReturns.benchmarkRelativeReturn)} />
           </div>
 
           <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-            <StatCard icon={TrendingUp} label="Rolling 30D vol." value={returnMetricValue(trueReturns.rolling30dVolatility)} sub={returnMetricSub(trueReturns.rolling30dVolatility, 'annualized')} tone={trueReturns.rolling30dVolatility.available ? 'violet' : 'cyan'} />
-            <StatCard icon={TrendingUp} label="Best rolling 12M" value={returnMetricValue(trueReturns.bestRolling12m)} sub={returnMetricSub(trueReturns.bestRolling12m)} tone={returnMetricTone(trueReturns.bestRolling12m)} />
-            <StatCard icon={TrendingDown} label="Worst rolling 12M" value={returnMetricValue(trueReturns.worstRolling12m)} sub={returnMetricSub(trueReturns.worstRolling12m)} tone={returnMetricTone(trueReturns.worstRolling12m)} />
-            <StatCard icon={TrendingDown} label="Drawdown recovery" value={recoveryMetricValue(trueReturns.recoveryFromDrawdownMonths)} sub={returnMetricSub(trueReturns.recoveryFromDrawdownMonths, 'estimated months')} tone={trueReturns.recoveryFromDrawdownMonths.available ? 'cyan' : 'red'} />
+            <StatCard icon={TrendingUp} label="Zmienność 30D" value={returnMetricValue(trueReturns.rolling30dVolatility)} sub={returnMetricSub(trueReturns.rolling30dVolatility, 'annualizowana')} tone={trueReturns.rolling30dVolatility.available ? 'violet' : 'cyan'} />
+            <StatCard icon={TrendingUp} label="Najlepsze 12M" value={returnMetricValue(trueReturns.bestRolling12m)} sub={returnMetricSub(trueReturns.bestRolling12m)} tone={returnMetricTone(trueReturns.bestRolling12m)} />
+            <StatCard icon={TrendingDown} label="Najgorsze 12M" value={returnMetricValue(trueReturns.worstRolling12m)} sub={returnMetricSub(trueReturns.worstRolling12m)} tone={returnMetricTone(trueReturns.worstRolling12m)} />
+            <StatCard icon={TrendingDown} label="Wyjście z drawdown" value={recoveryMetricValue(trueReturns.recoveryFromDrawdownMonths)} sub={returnMetricSub(trueReturns.recoveryFromDrawdownMonths, 'szac. miesiące')} tone={trueReturns.recoveryFromDrawdownMonths.available ? 'cyan' : 'red'} />
           </div>
 
           {trueReturns.summaryReason ? (
             <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 text-sm text-cyan-100">
-              True return engine limited data: {trueReturns.summaryReason}
+              Ograniczone dane dla silnika zwrotu: {trueReturns.summaryReason}
             </div>
           ) : null}
 
           <ReturnDiagnosticsPanel diagnostics={trueReturns.sanityDiagnostics} />
 
           <div className="grid gap-3 md:grid-cols-5">
-            <InfoLine label="Valid TWR intervals" value={diagnosticCount(trueReturns.validIntervals.length, trueReturns.validIntervalStartDate, trueReturns.validIntervalEndDate)} />
-            <InfoLine label="Excluded intervals" value={String(trueReturns.excludedIntervals.length)} />
-            <InfoLine label="Excluded reasons" value={trueReturns.exclusionReasonSummary} />
-            <InfoLine label="Return curve" value={String(trueReturns.cumulativeReturnCurve.length)} />
-            <InfoLine label="Benchmark overlap" value={diagnosticCount(trueReturns.benchmarkOverlapPoints, trueReturns.benchmarkOverlapStartDate, trueReturns.benchmarkOverlapEndDate)} />
+            <InfoLine label="Poprawne interwały TWR" value={diagnosticCount(trueReturns.validIntervals.length, trueReturns.validIntervalStartDate, trueReturns.validIntervalEndDate)} />
+            <InfoLine label="Pominięte interwały" value={String(trueReturns.excludedIntervals.length)} />
+            <InfoLine label="Powody pominięć" value={trueReturns.exclusionReasonSummary} />
+            <InfoLine label="Punkty krzywej zwrotu" value={String(trueReturns.cumulativeReturnCurve.length)} />
+            <InfoLine label="Overlap benchmarku" value={diagnosticCount(trueReturns.benchmarkOverlapPoints, trueReturns.benchmarkOverlapStartDate, trueReturns.benchmarkOverlapEndDate)} />
           </div>
 
           <div className="grid gap-6 2xl:grid-cols-3">
             <Card>
               <div className="mb-5 flex items-center justify-between gap-4">
                 <div>
-                  <h3 className="text-lg font-bold text-white">Rolling 12M return</h3>
-                  <p className="mt-1 text-sm text-slate-500">TWR-based rolling return, excluding invalid cash-flow dominated intervals.</p>
+                  <h3 className="text-lg font-bold text-white">Zwrot kroczący 12M</h3>
+                  <p className="mt-1 text-sm text-slate-500">Zwrot TWR, z pominięciem interwałów zdominowanych przez przepływy gotówki.</p>
                 </div>
                 <TrustBadge>TWR</TrustBadge>
               </div>
-              {trueReturns.rollingReturnCurve.length > 0 ? <RollingReturnChart data={trueReturns.rollingReturnCurve} range="MAX" /> : <EmptyState text="Need at least 12 months of valid TWR history." />}
+              {trueReturns.rollingReturnCurve.length > 0 ? <RollingReturnChart data={trueReturns.rollingReturnCurve} range="MAX" /> : <EmptyState text="Potrzeba co najmniej 12 miesięcy poprawnej historii TWR." />}
             </Card>
 
             <Card>
               <div className="mb-5">
-                <h3 className="text-lg font-bold text-white">Rolling drawdown</h3>
-                <p className="mt-1 text-sm text-slate-500">Drawdown from the true-return cumulative curve, not raw deposits.</p>
+                <h3 className="text-lg font-bold text-white">Drawdown kroczący</h3>
+                <p className="mt-1 text-sm text-slate-500">Drawdown z krzywej zwrotu, bez traktowania wpłat jako strat lub zysków.</p>
               </div>
-              {trueReturns.drawdownCurve.length > 0 ? <DrawdownCurveChart data={trueReturns.drawdownCurve} range="MAX" /> : <EmptyState text={trueReturns.drawdownReason ?? 'Need more valid contribution-adjusted intervals for drawdown.'} />}
+              {trueReturns.drawdownCurve.length > 0 ? <DrawdownCurveChart data={trueReturns.drawdownCurve} range="MAX" /> : <EmptyState text={trueReturns.drawdownReason ?? 'Potrzeba więcej poprawnych interwałów po korekcie wpłat.'} />}
             </Card>
 
             <Card>
               <div className="mb-5">
-                <h3 className="text-lg font-bold text-white">Benchmark relative</h3>
-                <p className="mt-1 text-sm text-slate-500">Portfolio TWR curve versus benchmark on shared valid dates.</p>
+                <h3 className="text-lg font-bold text-white">Względem benchmarku</h3>
+                <p className="mt-1 text-sm text-slate-500">Krzywa TWR portfela kontra benchmark tylko na wspólnych poprawnych datach.</p>
               </div>
-              {trueReturns.benchmarkRelativeCurve.length > 0 ? <BenchmarkRelativeChart data={trueReturns.benchmarkRelativeCurve} range="MAX" /> : <EmptyState text={trueReturns.benchmarkRelativeReturn.reason ?? 'Need overlapping benchmark history.'} />}
+              {trueReturns.benchmarkRelativeCurve.length > 0 ? <BenchmarkRelativeChart data={trueReturns.benchmarkRelativeCurve} range="MAX" /> : <EmptyState text={trueReturns.benchmarkRelativeReturn.reason ?? 'Brak wystarczającego wspólnego zakresu benchmarku.'} />}
             </Card>
           </div>
 
@@ -822,25 +822,25 @@ export default function PortfolioIntelligencePage() {
             <Card>
               <div className="mb-5 flex items-center justify-between gap-4">
                 <div>
-                  <h3 className="text-lg font-bold text-white">Monthly returns</h3>
-                  <p className="mt-1 text-sm text-slate-500">Snapshot-based estimated monthly returns. Months that fail sparse-history or cash-flow guards stay unavailable.</p>
+                  <h3 className="text-lg font-bold text-white">Zwroty miesięczne</h3>
+                  <p className="mt-1 text-sm text-slate-500">Szacunkowe zwroty ze snapshotów. Miesiące z brakami historii albo dominującymi wpłatami zostają niedostępne.</p>
                 </div>
-                <TrustBadge>Estimated</TrustBadge>
+                <TrustBadge>Szacunkowe</TrustBadge>
               </div>
               {performance.monthlyReturns.length >= 2 ? (
                 <MonthlyReturnsGrid rows={performance.monthlyReturns} />
               ) : singleMonthlyReturn ? (
                 <SingleMonthlyReturnSummary row={singleMonthlyReturn} />
               ) : (
-                <EmptyState text={portfolioHistoryPoints < 2 ? 'Not enough portfolio history yet. Run portfolio historical valuation backfill.' : 'Need more monthly snapshots before monthly returns are meaningful.'} />
+                <EmptyState text={portfolioHistoryPoints < 2 ? 'Za mało historii portfela. Uruchom backfill wyceny historycznej.' : 'Potrzeba więcej miesięcznych snapshotów, żeby zwroty miały sens.'} />
               )}
               <PerformanceEngineSummary performance={performance} realizedPnl={realizedPnl} unrealizedPnl={unrealizedPnl} feesAndTaxes={feesAndTaxes} baseCurrency={baseCurrency} />
             </Card>
 
             <Card>
               <div className="mb-5">
-                <h3 className="text-lg font-bold text-white">Portfolio vs benchmark</h3>
-                <p className="mt-1 text-sm text-slate-500">Common-overlap indexed comparison. Index 100 = first shared snapshot/benchmark point.</p>
+                <h3 className="text-lg font-bold text-white">Portfel vs benchmark</h3>
+                <p className="mt-1 text-sm text-slate-500">Porównanie na wspólnym zakresie dat. Indeks 100 = pierwszy wspólny punkt.</p>
               </div>
               {benchmarkPerformance.available ? (
                 <>
@@ -1189,32 +1189,32 @@ function SubmitButton({ children, disabled }: { children: ReactNode; disabled?: 
 }
 
 function ReturnDiagnosticsPanel({ diagnostics }: { diagnostics: ReturnSanityDiagnostics }) {
-  const reasons = diagnostics.confidenceReasons.length > 0 ? diagnostics.confidenceReasons.join(' · ') : 'stable interval coverage'
+  const reasons = diagnostics.confidenceReasons.length > 0 ? diagnostics.confidenceReasons.join(' · ') : 'stabilne pokrycie interwałów'
   const largeFlows = diagnostics.largeCashFlowDates.length > 0
     ? diagnostics.largeCashFlowDates.map((item) => `${formatDate(item.date)} ${PLN.format(item.amount)}`).join(' · ')
-    : 'none detected'
+    : 'brak wykrytych'
 
   return (
     <Card>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-lg font-bold text-white">Return confidence</h3>
-          <p className="mt-1 text-sm text-slate-500">Snapshot-based sanity checks compare raw portfolio growth, contributions, and valid TWR intervals.</p>
+          <h3 className="text-lg font-bold text-white">Pewność metryk</h3>
+          <p className="mt-1 text-sm text-slate-500">Kontrole snapshotowe porównują wzrost portfela, wpłaty i poprawne interwały TWR.</p>
         </div>
         <span className={`rounded-full px-3 py-1 text-xs font-semibold ${confidenceTone(diagnostics.confidence)}`}>{confidenceLabel(diagnostics.confidence)}</span>
       </div>
       <div className="mt-5 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
-        <InfoLine label="Portfolio value" value={`${diagnostics.startPortfolioValue == null ? '—' : PLN.format(diagnostics.startPortfolioValue)} → ${diagnostics.endPortfolioValue == null ? '—' : PLN.format(diagnostics.endPortfolioValue)}`} />
-        <InfoLine label="Contribution" value={`${diagnostics.startContribution == null ? '—' : PLN.format(diagnostics.startContribution)} → ${diagnostics.endContribution == null ? '—' : PLN.format(diagnostics.endContribution)}`} />
-        <InfoLine label="Nominal growth" value={formatPct(diagnostics.nominalGrowthPct)} />
-        <InfoLine label="Adjusted growth" value={formatPct(diagnostics.contributionAdjustedGrowthPct)} />
-        <InfoLine label="Net cash flow" value={`${diagnostics.startNetCashFlow == null ? '—' : PLN.format(diagnostics.startNetCashFlow)} → ${diagnostics.endNetCashFlow == null ? '—' : PLN.format(diagnostics.endNetCashFlow)}`} />
-        <InfoLine label="Flow impact" value={formatPct(diagnostics.flowImpactRatio)} />
-        <InfoLine label="Main driver" value={diagnostics.performanceDriver} />
-        <InfoLine label="Confidence note" value={reasons} />
+        <InfoLine label="Wartość portfela" value={`${diagnostics.startPortfolioValue == null ? '—' : PLN.format(diagnostics.startPortfolioValue)} → ${diagnostics.endPortfolioValue == null ? '—' : PLN.format(diagnostics.endPortfolioValue)}`} />
+        <InfoLine label="Wpłaty" value={`${diagnostics.startContribution == null ? '—' : PLN.format(diagnostics.startContribution)} → ${diagnostics.endContribution == null ? '—' : PLN.format(diagnostics.endContribution)}`} />
+        <InfoLine label="Wzrost nominalny" value={formatPct(diagnostics.nominalGrowthPct)} />
+        <InfoLine label="Wzrost po korekcie wpłat" value={formatPct(diagnostics.contributionAdjustedGrowthPct)} />
+        <InfoLine label="Przepływ netto" value={`${diagnostics.startNetCashFlow == null ? '—' : PLN.format(diagnostics.startNetCashFlow)} → ${diagnostics.endNetCashFlow == null ? '—' : PLN.format(diagnostics.endNetCashFlow)}`} />
+        <InfoLine label="Wpływ przepływów" value={formatPct(diagnostics.flowImpactRatio)} />
+        <InfoLine label="Główny driver" value={diagnostics.performanceDriver} />
+        <InfoLine label="Notatka o pewności" value={reasons} />
       </div>
       <details className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
-        <summary className="cursor-pointer font-semibold text-white">Large cash-flow dates</summary>
+        <summary className="cursor-pointer font-semibold text-white">Duże przepływy gotówki</summary>
         <p className="mt-3 leading-6">{largeFlows}</p>
       </details>
     </Card>
@@ -1309,7 +1309,7 @@ function LedgerTable({ entries, onDelete, saving }: { entries: CashLedgerEntry[]
     <div className="overflow-hidden rounded-2xl border border-white/10">
       <table className="w-full text-sm">
         <thead className="bg-white/[0.04] text-slate-500">
-          <tr><th className="p-4 text-left">Data</th><th className="p-4 text-left">Typ</th><th className="p-4 text-right">Kwota</th><th className="p-4 text-left">Note</th><th className="p-4 text-right" /></tr>
+          <tr><th className="p-4 text-left">Data</th><th className="p-4 text-left">Typ</th><th className="p-4 text-right">Kwota</th><th className="p-4 text-left">Notatka</th><th className="p-4 text-right" /></tr>
         </thead>
         <tbody>
           {entries.map((entry) => (
@@ -1333,7 +1333,7 @@ function DividendTable({ rows, onDelete, saving, baseCurrency }: { rows: Dividen
     <div className="overflow-hidden rounded-2xl border border-white/10">
       <table className="w-full text-sm">
         <thead className="bg-white/[0.04] text-slate-500">
-          <tr><th className="p-4 text-left">Data</th><th className="p-4 text-left">Aktywo</th><th className="p-4 text-right">Brutto</th><th className="p-4 text-right">Tax</th><th className="p-4 text-right">Netto</th><th className="p-4 text-right" /></tr>
+          <tr><th className="p-4 text-left">Data</th><th className="p-4 text-left">Aktywo</th><th className="p-4 text-right">Brutto</th><th className="p-4 text-right">Podatek</th><th className="p-4 text-right">Netto</th><th className="p-4 text-right" /></tr>
         </thead>
         <tbody>
           {rows.map((row) => (
@@ -1344,7 +1344,7 @@ function DividendTable({ rows, onDelete, saving, baseCurrency }: { rows: Dividen
               <td className="p-4 text-right text-amber-200">{formatCurrencyValue(num(row.tax_amount), row.currency)}</td>
               <td className="p-4 text-right">
                 <div className="font-semibold text-emerald-300">{formatCurrencyValue(num(row.net_amount), row.currency)}</div>
-                {row.currency !== baseCurrency ? <div className="text-xs text-slate-500">{baseCurrency} estimate unavailable: missing historical FX.</div> : null}
+                {row.currency !== baseCurrency ? <div className="text-xs text-slate-500">Wycena {baseCurrency} niedostępna: brak historycznego FX.</div> : null}
               </td>
               <td className="p-4 text-right"><button disabled={saving} onClick={() => onDelete(row.id)} className="rounded-xl p-2 text-slate-500 transition hover:bg-white/10 hover:text-rose-300"><Trash2 size={16} /></button></td>
             </tr>
