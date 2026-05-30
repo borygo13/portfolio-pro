@@ -148,7 +148,7 @@ function Topbar() {
           <CalendarDays size={14} />
           <span>Maj 2026</span>
           <span className="hidden h-1 w-1 rounded-full bg-slate-700 md:block" />
-          <span className="hidden md:block">Rynek: otwarty / demo</span>
+          <span className="hidden md:block">Dane: Supabase</span>
         </div>
         <h1 className="mt-1 text-xl font-bold tracking-tight text-white md:text-2xl">Portfolio PRO</h1>
       </div>

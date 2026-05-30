@@ -159,21 +159,21 @@ export function buildSimpleEquityCurve(transactions: Transaction[], currentValue
     byMonth.set(key, (byMonth.get(key) ?? 0) + (t.transaction_type === 'BUY' ? amount : -amount))
   }
 
-  const points: { month: string; portfolio: number; contribution: number; benchmark: number }[] = []
+  const points: { month: string; portfolio: number; contribution: number }[] = []
   let contribution = 0
   for (const [month, value] of byMonth.entries()) {
     contribution += value
-    points.push({ month, contribution, portfolio: contribution, benchmark: contribution })
+    points.push({ month, contribution, portfolio: contribution })
   }
 
   if (points.length === 0) {
     return [
-      { month: 'start', portfolio: 0, contribution: 0, benchmark: 0 },
-      { month: 'teraz', portfolio: currentValue, contribution: 0, benchmark: 0 },
+      { month: 'start', portfolio: 0, contribution: 0 },
+      { month: 'teraz', portfolio: currentValue, contribution: 0 },
     ]
   }
 
   const last = points[points.length - 1]
-  points.push({ month: 'teraz', contribution: last.contribution, portfolio: currentValue, benchmark: last.contribution })
+  points.push({ month: 'teraz', contribution: last.contribution, portfolio: currentValue })
   return points
 }

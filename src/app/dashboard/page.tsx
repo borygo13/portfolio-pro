@@ -1,10 +1,9 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, Banknote, CheckCircle2, Database, Landmark, Loader2, RefreshCw, ShieldCheck, Target, TrendingUp, Wallet, Zap } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Database, Landmark, Loader2, RefreshCw, ShieldCheck, Target, TrendingUp, Wallet, Zap } from 'lucide-react'
 import { Shell, PageHeader, Card, StatCard, TrustBadge, PillButton } from '@/components/Shell'
-import { AllocationChart, AssetHistoryChart, DividendChart, EquityChart } from '@/components/Charts'
-import { dividends, tradingStats } from '@/lib/demo-data'
+import { AllocationChart, AssetHistoryChart, EquityChart } from '@/components/Charts'
 import { PLN, PCT } from '@/lib/format'
 import { FX_PREVIOUS_LOOKBACK_DAYS } from '@/lib/market/fx'
 import { supabase } from '@/lib/supabase/client'
@@ -154,7 +153,6 @@ function buildSnapshotEquityCurve(snapshots: PortfolioSnapshot[]) {
       month: snapshotLabel(snapshot.snapshot_date),
       portfolio: n(snapshot.total_value),
       contribution,
-      benchmark: contribution,
     }
   })
 }
@@ -243,8 +241,8 @@ function buildAssetHistoryCurve(history: MarketPriceHistoryPoint[], asset: Asset
   })
 
   const warnings: string[] = []
-  if (skippedCurrencyRows > 0) warnings.push(`${skippedCurrencyRows} row(s) skipped because source currency differs from ${displayCurrency}.`)
-  if (fxMissingRows > 0) warnings.push(`${fxMissingRows} row(s) still miss ${baseCurrency} estimate because no FX was found within ${FX_PREVIOUS_LOOKBACK_DAYS} day(s).`)
+  if (skippedCurrencyRows > 0) warnings.push(`${skippedCurrencyRows} wiersz(e) pominięto, bo mają inną walutę instrumentu niż ${displayCurrency}.`)
+  if (fxMissingRows > 0) warnings.push(`${fxMissingRows} wiersz(e) nadal nie mają wyceny ${baseCurrency}, bo nie znaleziono FX w oknie ${FX_PREVIOUS_LOOKBACK_DAYS} dni.`)
 
   return { points, displayCurrency, baseCurrency, skippedCurrencyRows, baseEstimateRows, fxMissingRows, warnings }
 }
@@ -305,6 +303,7 @@ export default function Dashboard() {
   const positions = useMemo(() => buildPositions(assets, transactions, prices), [assets, transactions, prices])
   const activePositions = useMemo(() => positions.filter((p) => p.quantity > 0.00000001), [positions])
   const marketActivePositions = useMemo(() => activePositions.filter((p) => isMarketPricedAsset(p.asset)), [activePositions])
+  const marketPricedAssets = useMemo(() => assets.filter(isMarketPricedAsset), [assets])
   const watchlistPositions = useMemo(() => positions.filter((p) => p.quantity <= 0.00000001), [positions])
   const summary = useMemo(() => portfolioSummary(positions), [positions])
   const edoProjections = useMemo(() => edoBonds.map((bond) => projectEdoBond(bond)), [edoBonds])
@@ -325,10 +324,12 @@ export default function Dashboard() {
   const snapshotEquityCurve = useMemo(() => buildSnapshotEquityCurve(snapshots), [snapshots])
   const fallbackEquityCurve = useMemo(() => buildSimpleEquityCurve(transactions, totalLongTermValue), [transactions, totalLongTermValue])
   const equityCurve = snapshotEquityCurve.length > 0 ? filterByChartRange(snapshotEquityCurve, portfolioRange) : fallbackEquityCurve
+  const hasFallbackHistory = fallbackEquityCurve.some((point) => n(point.portfolio) > 0 || n(point.contribution) > 0)
+  const hasPortfolioHistory = snapshotEquityCurve.length > 0 || hasFallbackHistory
+  const usesSnapshotHistory = snapshotEquityCurve.length > 0
   const priceWarnings = useMemo(() => buildPriceWarnings(assets, prices), [assets, prices])
   const selectedAsset = useMemo(() => marketActivePositions.find((p) => p.asset.id === selectedAssetId)?.asset ?? null, [marketActivePositions, selectedAssetId])
   const assetHistoryCurve = useMemo(() => buildAssetHistoryCurve(assetHistory, selectedAsset, portfolio?.currency ?? 'PLN'), [assetHistory, selectedAsset, portfolio?.currency])
-  const dividendSum = dividends.reduce((s, d) => s + d.value, 0)
   const bondPnl = edoSummary.currentValueAfterTax - edoSummary.principal
 
   useEffect(() => {
@@ -369,14 +370,14 @@ export default function Dashboard() {
 
   return (
     <Shell>
-      <PageHeader eyebrow="Stage C3.3 · Portfolio Dashboard Upgrade" title="Dashboard główny" description="Dashboard łączy aktywne pozycje, targety/watchlistę oraz obligacje EDO. Ceny są z Price Engine, a ręczne ceny zostają jako awaryjny override." />
+      <PageHeader eyebrow="Portfolio Dashboard" title="Dashboard główny" description="Dashboard pokazuje realny stan portfela w PLN. Sekcje bez danych pokazują ograniczenia zamiast przykładowych wartości." />
 
       {error ? <div className="mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
       {loading ? <div className="mb-6 flex items-center gap-2 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Ładowanie danych z Supabase...</div> : null}
 
       <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-        <StatCard icon={Wallet} label="Całość majątku" value={PLN.format(totalLongTermValue)} sub={`${activePositions.length} aktywnych pozycji + EDO`} />
-        <StatCard icon={Target} label="Wkład / koszt" value={PLN.format(totalLongTermCost)} sub={`${PLN.format(totalLongTermPnl)} P/L long-term`} tone={totalLongTermPnl >= 0 ? 'emerald' : 'red'} />
+        <StatCard icon={Wallet} label="Całość majątku" value={PLN.format(totalLongTermValue)} sub={activePositions.length || edoBonds.length ? `${activePositions.length} aktywnych pozycji + EDO` : 'Brak aktywnych pozycji'} />
+        <StatCard icon={Target} label="Wkład / koszt" value={PLN.format(totalLongTermCost)} sub={totalLongTermCost > 0 ? `${PLN.format(totalLongTermPnl)} P/L long-term` : 'Dodaj transakcję, żeby policzyć P/L'} tone={totalLongTermPnl >= 0 ? 'emerald' : 'red'} />
         <StatCard icon={Landmark} label="Obligacje EDO" value={PLN.format(edoSummary.currentValueAfterTax)} sub={`${PLN.format(bondPnl)} zysku po szac. podatku`} tone={bondPnl >= 0 ? 'emerald' : 'red'} />
         <StatCard icon={ShieldCheck} label="Portfolio" value={portfolio?.name ?? '—'} sub="Supabase live data" tone="violet" />
       </div>
@@ -407,12 +408,14 @@ export default function Dashboard() {
                 {priceWarnings.length > 0 ? <AlertTriangle size={16} className="text-amber-300" /> : <CheckCircle2 size={16} className="text-emerald-300" />}
                 Aktualność cen
               </div>
-              <p className="mt-3 text-2xl font-bold text-white">{priceWarnings.length > 0 ? `${priceWarnings.length} do sprawdzenia` : 'Ceny aktualne'}</p>
+              <p className="mt-3 text-2xl font-bold text-white">{marketPricedAssets.length === 0 ? 'Brak aktywów' : priceWarnings.length > 0 ? `${priceWarnings.length} do sprawdzenia` : 'Ceny aktualne'}</p>
               <p className="mt-2 text-sm text-slate-500">Sprawdzamy aktywa rynkowe bez ceny albo z ceną starszą niż 24h.</p>
             </div>
           </div>
           <div className="mt-5 space-y-2">
-            {priceWarnings.length === 0 ? (
+            {marketPricedAssets.length === 0 ? (
+              <div className="rounded-2xl bg-white/[0.04] p-3 text-sm text-slate-400">Dodaj aktywo rynkowe, żeby monitorować ceny.</div>
+            ) : priceWarnings.length === 0 ? (
               <div className="rounded-2xl bg-emerald-500/10 p-3 text-sm text-emerald-100">Brak brakujących lub przestarzałych cen w aktywach rynkowych.</div>
             ) : priceWarnings.slice(0, 5).map((warning) => (
               <div key={`${warning.asset.id}-${warning.reason}`} className="flex items-center justify-between gap-3 rounded-2xl bg-amber-500/10 p-3 text-sm">
@@ -432,7 +435,9 @@ export default function Dashboard() {
           <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-lg font-bold text-white">Portfel vs wkład</h3>
-              <p className="mt-1 text-sm text-slate-500">Krzywa używa dziennych snapshotów portfolio, a przy ich braku wraca do prostego modelu z transakcji.</p>
+              <p className="mt-1 text-sm text-slate-500">
+                {usesSnapshotHistory ? 'Dane snapshotowe w walucie portfela. Tooltip pokazuje pełną datę.' : 'Brak snapshotów portfolio; pokazujemy ograniczony podgląd z transakcji, bez udawania benchmarku.'}
+              </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {CHART_RANGES.map((range) => (
@@ -445,9 +450,17 @@ export default function Dashboard() {
           <div className="mb-4 flex flex-wrap gap-4 text-xs text-slate-400">
             <span className="inline-flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-violet-500" />Portfel</span>
             <span className="inline-flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-slate-400" />Wkład</span>
-            <span className="inline-flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-cyan-400" />Benchmark placeholder</span>
           </div>
-          <EquityChart data={equityCurve} range={portfolioRange} />
+          {hasPortfolioHistory ? (
+            <EquityChart data={equityCurve} range={portfolioRange} />
+          ) : (
+            <div className="grid min-h-[310px] place-items-center rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-6 text-center text-sm text-slate-400">
+              <div>
+                <p className="font-semibold text-white">Brak danych portfela</p>
+                <p className="mt-2">Dodaj aktywo i pierwszą transakcję, żeby zobaczyć wycenę oraz historię.</p>
+              </div>
+            </div>
+          )}
         </Card>
 
         <Card>
@@ -469,12 +482,12 @@ export default function Dashboard() {
         <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <h3 className="text-lg font-bold text-white">Historia aktywa</h3>
-            <p className="mt-1 text-sm text-slate-500">Dzienna historia z `market_prices` w naturalnej walucie instrumentu. Wycena portfela nadal używa waluty bazowej.</p>
+            <p className="mt-1 text-sm text-slate-500">Dzienna historia cen w naturalnej walucie instrumentu. Wycena portfela nadal używa PLN/waluty portfela.</p>
             {selectedAsset ? (
               <p className="mt-2 text-xs text-slate-500">
-                Chart currency: {assetHistoryCurve.displayCurrency}
+                Waluta wykresu: {assetHistoryCurve.displayCurrency}
                 {assetHistoryCurve.baseEstimateRows > 0 && assetHistoryCurve.displayCurrency !== assetHistoryCurve.baseCurrency
-                  ? ` · approx ${assetHistoryCurve.baseCurrency} available in tooltip`
+                  ? ` · szacunkowe ${assetHistoryCurve.baseCurrency} w tooltipie`
                   : ''}
               </p>
             ) : null}
@@ -516,9 +529,9 @@ export default function Dashboard() {
             ) : null}
             <AssetHistoryChart data={assetHistoryCurve.points} range={assetHistoryRange} />
             <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500">
-              <span>Source price: {assetHistoryCurve.displayCurrency}</span>
-              <span>Portfolio estimate: {assetHistoryCurve.baseCurrency}</span>
-              {assetHistoryCurve.baseEstimateRows > 0 ? <span>{assetHistoryCurve.baseEstimateRows} rows with base estimate</span> : <span>{assetHistoryCurve.baseCurrency} estimate unavailable when FX is missing</span>}
+              <span>Cena instrumentu: {assetHistoryCurve.displayCurrency}</span>
+              <span>Wycena portfela: {assetHistoryCurve.baseCurrency}</span>
+              {assetHistoryCurve.baseEstimateRows > 0 ? <span>{assetHistoryCurve.baseEstimateRows} wiersz(e) z wyceną bazową</span> : <span>Wycena {assetHistoryCurve.baseCurrency} niedostępna bez FX</span>}
             </div>
           </>
         )}
@@ -527,8 +540,11 @@ export default function Dashboard() {
       <div className="mt-6 grid gap-6 2xl:grid-cols-[.75fr_1.25fr]">
         <Card>
           <h3 className="text-lg font-bold text-white">Dywidendy miesięczne</h3>
-          <p className="mt-1 text-sm text-slate-500">Jeszcze demo. Prawdziwe dywidendy dodamy w osobnym etapie.</p>
-          <DividendChart data={dividends} />
+          <p className="mt-1 text-sm text-slate-500">Nie pokazujemy tu przykładowych dywidend jako realnego wyniku. Pełne podsumowanie dashboardowe będzie w C5.9.</p>
+          <div className="mt-5 rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-6 text-sm text-slate-400">
+            <p className="font-semibold text-white">Sekcja w budowie</p>
+            <p className="mt-2">Rekordy dywidend są dostępne w Intelligence, ale dashboard nie dolicza jeszcze osobnego realnego widoku dywidend.</p>
+          </div>
         </Card>
 
         <Card>
@@ -622,10 +638,10 @@ export default function Dashboard() {
       </div>
 
       <div className="mt-6 grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-        <Card><div className="flex items-center gap-3"><TrendingUp className="text-emerald-400" /><div><p className="text-sm text-slate-500">CFD net P/L</p><p className="text-2xl font-bold text-white">{PLN.format(tradingStats.netPnl)}</p></div></div></Card>
-        <Card><div className="flex items-center gap-3"><Activity className="text-cyan-400" /><div><p className="text-sm text-slate-500">Winrate</p><p className="text-2xl font-bold text-white">{PCT.format(tradingStats.wins / tradingStats.trades)}</p></div></div></Card>
-        <Card><div className="flex items-center gap-3"><Database className="text-violet-300" /><div><p className="text-sm text-slate-500">Long-term P/L</p><p className="text-2xl font-bold text-white">{PLN.format(totalLongTermPnl)}</p></div></div></Card>
-        <Card><div className="flex items-center gap-3"><Banknote className="text-amber-300" /><div><p className="text-sm text-slate-500">Dywidendy YTD</p><p className="text-2xl font-bold text-white">{PLN.format(dividendSum)}</p></div></div></Card>
+        <Card><div className="flex items-center gap-3"><ShieldCheck className="text-emerald-400" /><div><p className="text-sm text-slate-500">Waluta portfela</p><p className="text-2xl font-bold text-white">{portfolio?.currency ?? 'PLN'}</p><p className="mt-1 text-xs text-slate-500">Wycena portfela w PLN/bazowej</p></div></div></Card>
+        <Card><div className="flex items-center gap-3"><AlertTriangle className="text-amber-300" /><div><p className="text-sm text-slate-500">Ograniczenia danych</p><p className="text-2xl font-bold text-white">{priceWarnings.length || !usesSnapshotHistory ? 'Tak' : 'Brak'}</p><p className="mt-1 text-xs text-slate-500">{!usesSnapshotHistory ? 'Brak snapshotów' : priceWarnings.length ? 'Sprawdź ceny' : 'Ceny i snapshoty dostępne'}</p></div></div></Card>
+        <Card><div className="flex items-center gap-3"><Database className="text-violet-300" /><div><p className="text-sm text-slate-500">Long-term P/L</p><p className="text-2xl font-bold text-white">{PLN.format(totalLongTermPnl)}</p><p className="mt-1 text-xs text-slate-500">Tylko realne pozycje i EDO</p></div></div></Card>
+        <Card><div className="flex items-center gap-3"><TrendingUp className="text-cyan-300" /><div><p className="text-sm text-slate-500">Trading journal</p><p className="text-2xl font-bold text-white">C7</p><p className="mt-1 text-xs text-slate-500">Bez danych demo w dashboardzie</p></div></div></Card>
       </div>
     </Shell>
   )

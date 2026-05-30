@@ -10,7 +10,7 @@ export default function SettingsPage() {
         <Card><Download className="mb-4 text-cyan-300" /><h3 className="text-lg font-bold text-white">Eksport danych</h3><p className="mt-2 text-sm leading-6 text-slate-400">Docelowo przycisk eksportu CSV/JSON/XLSX dla całej aplikacji.</p></Card>
         <Card><KeyRound className="mb-4 text-emerald-300" /><h3 className="text-lg font-bold text-white">Logowanie</h3><p className="mt-2 text-sm leading-6 text-slate-400">Email + hasło, później opcjonalnie Google login.</p></Card>
       </div>
-      <Card className="mt-6"><ShieldCheck className="mb-4 text-emerald-300" /><h3 className="text-lg font-bold text-white">Strategia backupu</h3><p className="mt-2 text-sm leading-6 text-slate-400">Dane mają być przenośne. Baza w Supabase, migracje SQL w repo, eksport z aplikacji i opcjonalny pg_dump.</p><FeatureNote>Na tym etapie to jeszcze demo UI. Następny milestone to podpięcie realnej bazy i autoryzacji.</FeatureNote></Card>
+      <Card className="mt-6"><ShieldCheck className="mb-4 text-emerald-300" /><h3 className="text-lg font-bold text-white">Strategia backupu</h3><p className="mt-2 text-sm leading-6 text-slate-400">Dane mają być przenośne. Baza w Supabase, migracje SQL w repo, eksport z aplikacji i opcjonalny pg_dump.</p><FeatureNote>Supabase i logowanie są już realnym źródłem danych. Eksport z aplikacji pozostaje przyszłym etapem; przed deployem stosuj migracje SQL w Supabase.</FeatureNote></Card>
     </Shell>
   )
 }
