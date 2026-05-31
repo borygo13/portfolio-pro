@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent } from 'react'
-import { AlertTriangle, CheckCircle2, Database, Download, FileDown, KeyRound, Loader2, RefreshCw, ShieldCheck, Upload } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Database, Download, FileDown, FileSearch, KeyRound, Loader2, RefreshCw, ShieldCheck, Upload } from 'lucide-react'
 import { Shell, PageHeader, Card, FeatureNote, TrustBadge } from '@/components/Shell'
 import {
   buildPortfolioBackupJson,
@@ -17,6 +17,12 @@ import {
   summarizeBackupWithCurrentContext,
   type BackupValidationResult,
 } from '@/lib/backup/validate'
+import {
+  buildCsvDryRunSummary,
+  describeCsvDelimiter,
+  parseCsvText,
+  type CsvDryRunSummary,
+} from '@/lib/import/csv-dry-run'
 import { getBackupContext, fetchPortfolioBackupData, BACKUP_EXPORT_LIMITS, type BackupContext } from '@/lib/supabase/backup'
 import { supabase } from '@/lib/supabase/client'
 
@@ -60,6 +66,13 @@ function validationTone(status: BackupValidationResult['status'] | undefined) {
   return { label: 'Nie wczytano backupu', className: 'border-white/10 bg-white/[0.03] text-slate-400', icon: ShieldCheck }
 }
 
+function csvImportTone(status: CsvDryRunSummary['status'] | undefined) {
+  if (status === 'valid') return { label: 'CSV wygląda poprawnie', className: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100', icon: CheckCircle2 }
+  if (status === 'warning') return { label: 'CSV ma ostrzeżenia', className: 'border-amber-500/20 bg-amber-500/10 text-amber-100', icon: AlertTriangle }
+  if (status === 'invalid') return { label: 'CSV jest niepoprawny', className: 'border-rose-500/20 bg-rose-500/10 text-rose-100', icon: AlertTriangle }
+  return { label: 'Nie wczytano CSV', className: 'border-white/10 bg-white/[0.03] text-slate-400', icon: FileSearch }
+}
+
 export default function SettingsPage() {
   const [context, setContext] = useState<BackupContext | null>(null)
   const [options, setOptions] = useState<BackupExportOptions>(defaultOptions)
@@ -68,6 +81,9 @@ export default function SettingsPage() {
   const [validating, setValidating] = useState(false)
   const [validationResult, setValidationResult] = useState<BackupValidationResult | null>(null)
   const [validationFileName, setValidationFileName] = useState('')
+  const [csvDryRunLoading, setCsvDryRunLoading] = useState(false)
+  const [csvDryRunResult, setCsvDryRunResult] = useState<CsvDryRunSummary | null>(null)
+  const [csvDryRunFileName, setCsvDryRunFileName] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
 
@@ -150,6 +166,8 @@ export default function SettingsPage() {
   }, [context, validationResult])
   const validationState = validationTone(validationResult?.status)
   const ValidationIcon = validationState.icon
+  const csvState = csvImportTone(csvDryRunResult?.status)
+  const CsvStateIcon = csvState.icon
 
   async function handleBackupValidation(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
@@ -174,12 +192,43 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleCsvDryRun(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    setCsvDryRunLoading(true)
+    setError(null)
+    setSuccess(null)
+    setCsvDryRunFileName(file.name)
+    try {
+      const text = await file.text()
+      setCsvDryRunResult(buildCsvDryRunSummary(parseCsvText(text)))
+    } catch (err: any) {
+      setCsvDryRunResult({
+        status: 'invalid',
+        delimiter: null,
+        importKind: 'unknown',
+        importKindLabel: 'Nieznany format CSV',
+        brokerHint: null,
+        headers: [],
+        normalizedHeaders: [],
+        rowCount: 0,
+        sampleRows: [],
+        mapping: [],
+        errors: [{ code: 'file-read-error', message: err?.message ?? 'Nie udało się odczytać pliku CSV.' }],
+        warnings: [],
+      })
+    } finally {
+      setCsvDryRunLoading(false)
+      event.target.value = ''
+    }
+  }
+
   return (
     <Shell>
       <PageHeader
-        eyebrow="System · C6.0a / C6.0b"
+        eyebrow="System · C6.0a / C6.0b / C6.0c"
         title="Backup, Supabase i ustawienia"
-        description="Eksportuj czytelny backup i sprawdź plik JSON w trybie dry run. Ten etap nie przywraca danych i niczego nie importuje."
+        description="Eksportuj czytelny backup, sprawdź plik JSON i podejrzyj CSV w trybie dry run. Ten etap niczego nie importuje."
       />
 
       {error ? <div className="mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
@@ -389,6 +438,76 @@ export default function SettingsPage() {
       </Card>
 
       <Card className="mt-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-white">Import CSV — dry run</h3>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">Wczytaj CSV lokalnie w przeglądarce. Ten etap pokazuje nagłówki, próbkę, typ importu i ostrzeżenia, ale niczego nie zapisuje do bazy.</p>
+          </div>
+          <TrustBadge>Preview only</TrustBadge>
+        </div>
+
+        <FeatureNote>
+          Najpierw pobierz i sprawdź backup JSON. Ten podgląd CSV nie tworzy aktywów, transakcji, dochodów ani wpisów cash ledger.
+        </FeatureNote>
+
+        <div className="mt-5 grid gap-4 lg:grid-cols-[.8fr_1.2fr]">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-6 text-center transition hover:border-cyan-300/40 hover:bg-cyan-500/10">
+              <FileSearch className="mb-3 text-cyan-300" size={24} />
+              <span className="font-semibold text-white">Wczytaj CSV</span>
+              <span className="mt-1 text-xs text-slate-500">Obsługiwane: przecinek, średnik, tabulator, cudzysłowy i polskie znaki.</span>
+              <input type="file" accept=".csv,text/csv,text/plain" onChange={handleCsvDryRun} className="hidden" />
+            </label>
+            {csvDryRunLoading ? <div className="mt-4 flex items-center gap-2 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Sprawdzam CSV...</div> : null}
+            {csvDryRunFileName ? <p className="mt-4 text-xs text-slate-500">Ostatni plik: {csvDryRunFileName}</p> : null}
+            <button
+              type="button"
+              disabled
+              className="mt-4 inline-flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-2xl bg-white/5 px-4 py-3 text-sm font-semibold text-slate-500"
+            >
+              Import będzie dostępny w kolejnym etapie
+            </button>
+          </div>
+
+          <div className="space-y-4">
+            <div className={`rounded-2xl border p-4 ${csvState.className}`}>
+              <div className="flex items-center gap-2 font-semibold"><CsvStateIcon size={18} /> {csvState.label}</div>
+              <p className="mt-2 text-sm opacity-80">CSV zostaje lokalnie w przeglądarce. Nie ma uploadu, API route ani zapisu do Supabase.</p>
+            </div>
+
+            {csvDryRunResult ? (
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                <h4 className="font-semibold text-white">Podsumowanie CSV</h4>
+                <div className="mt-4 grid gap-3 text-sm md:grid-cols-2">
+                  <InfoLine label="Typ" value={csvDryRunResult.importKindLabel} />
+                  <InfoLine label="Delimiter" value={describeCsvDelimiter(csvDryRunResult.delimiter)} />
+                  <InfoLine label="Wiersze danych" value={formatCount(csvDryRunResult.rowCount)} />
+                  <InfoLine label="Nagłówki" value={formatCount(csvDryRunResult.headers.length)} />
+                </div>
+              </div>
+            ) : null}
+
+            {csvDryRunResult?.headers.length ? (
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                <h4 className="font-semibold text-white">Nagłówki</h4>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {csvDryRunResult.headers.map((header, index) => (
+                    <span key={`${header}-${index}`} className="rounded-full bg-white/10 px-3 py-1 text-xs font-semibold text-slate-300">{header || `kolumna_${index + 1}`}</span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {csvDryRunResult?.mapping.length ? <CsvMappingPreview result={csvDryRunResult} /> : null}
+            {csvDryRunResult?.mapping.some((row) => row.present) ? <CsvNormalizedPreview result={csvDryRunResult} /> : null}
+            {csvDryRunResult?.sampleRows.length ? <CsvRowsPreview result={csvDryRunResult} /> : null}
+            {csvDryRunResult?.warnings.length ? <MessageList title="Ostrzeżenia CSV" messages={csvDryRunResult.warnings.map((item) => item.message)} tone="amber" /> : null}
+            {csvDryRunResult?.errors.length ? <MessageList title="Błędy CSV" messages={csvDryRunResult.errors.map((item) => item.message)} tone="rose" /> : null}
+          </div>
+        </div>
+      </Card>
+
+      <Card className="mt-6">
         <div className="flex items-start gap-4">
           <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-white/10 text-slate-200"><Upload size={22} /></div>
           <div>
@@ -430,6 +549,81 @@ function MessageList({ title, messages, tone }: { title: string; messages: strin
       <ul className="mt-3 space-y-2">
         {messages.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
       </ul>
+    </div>
+  )
+}
+
+function CsvMappingPreview({ result }: { result: CsvDryRunSummary }) {
+  return (
+    <div className="overflow-x-auto rounded-2xl border border-white/10">
+      <table className="w-full min-w-[620px] text-sm">
+        <thead className="bg-white/[0.04] text-left text-xs uppercase tracking-wide text-slate-500">
+          <tr><th className="p-3">Docelowe pole</th><th className="p-3">Kolumna CSV</th><th className="p-3">Próbka</th><th className="p-3 text-right">Status</th></tr>
+        </thead>
+        <tbody>
+          {result.mapping.map((row) => (
+            <tr key={row.targetField} className="border-t border-white/10">
+              <td className="p-3 font-semibold text-white">{row.targetField}</td>
+              <td className="p-3 text-slate-300">{row.sourceHeader ?? '—'}</td>
+              <td className="max-w-[260px] truncate p-3 text-slate-500">{row.sampleValue || '—'}</td>
+              <td className={`p-3 text-right text-xs font-semibold ${row.present ? 'text-emerald-300' : 'text-amber-200'}`}>{row.present ? 'wykryto' : 'brak'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function CsvNormalizedPreview({ result }: { result: CsvDryRunSummary }) {
+  const fields = result.mapping.filter((row) => row.present).map((row) => row.targetField)
+  if (fields.length === 0) return null
+
+  return (
+    <div className="overflow-x-auto rounded-2xl border border-white/10">
+      <table className="w-full min-w-[640px] text-sm">
+        <thead className="bg-white/[0.04] text-left text-xs uppercase tracking-wide text-slate-500">
+          <tr>
+            <th className="p-3">#</th>
+            {fields.map((field) => <th key={field} className="p-3">{field}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {result.sampleRows.slice(0, 5).map((row) => (
+            <tr key={`normalized-${row.rowNumber}`} className="border-t border-white/10">
+              <td className="p-3 text-xs font-semibold text-slate-500">{row.rowNumber}</td>
+              {fields.map((field) => (
+                <td key={`${row.rowNumber}-${field}`} className="max-w-[220px] truncate p-3 text-slate-300">{row.normalized[field] || '—'}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function CsvRowsPreview({ result }: { result: CsvDryRunSummary }) {
+  return (
+    <div className="overflow-x-auto rounded-2xl border border-white/10">
+      <table className="w-full min-w-[720px] text-sm">
+        <thead className="bg-white/[0.04] text-left text-xs uppercase tracking-wide text-slate-500">
+          <tr>
+            <th className="p-3">#</th>
+            {result.headers.map((header, index) => <th key={`${header}-${index}`} className="p-3">{header || `kolumna_${index + 1}`}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {result.sampleRows.map((row) => (
+            <tr key={row.rowNumber} className="border-t border-white/10">
+              <td className="p-3 text-xs font-semibold text-slate-500">{row.rowNumber}</td>
+              {result.headers.map((header, index) => (
+                <td key={`${row.rowNumber}-${header}-${index}`} className="max-w-[220px] truncate p-3 text-slate-300">{row.cells[index] || '—'}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

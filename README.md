@@ -641,9 +641,10 @@ Large-table limits in C6.0a:
 TODOs:
 
 - C6.0b: dry-run backup validation,
-- C6.0c: actual restore/import backup flow,
-- C6.0d: simple CSV import,
-- C6.0e: XTB CSV import,
+- C6.0c: simple CSV import dry run,
+- C6.0d: actual restore/import backup flow,
+- C6.0e: actual simple CSV import,
+- C6.0f: XTB CSV import,
 - C6.1: IBKR import.
 
 ### Stage C6.0b - Backup Restore Dry Run / Validation
@@ -693,6 +694,47 @@ Security notes:
 - Backup contents are not uploaded to an API route and are not sent to Supabase.
 - C6.0b does not use service-role credentials and does not add environment variables.
 - A warning does not block preview; it tells you what future restore/import code would need to handle safely.
+
+### Stage C6.0c - Simple CSV Import Dry Run
+
+C6.0c adds a local CSV preview before actual importers exist. It does not write to Supabase, does not create assets, transactions, income events, cash ledger entries or EDO records, and does not upload CSV contents to any API route.
+
+Use it from:
+
+```text
+Backup / Ustawienia -> Import CSV — dry run
+```
+
+Recommended safety flow before future imports:
+
+1. Export a JSON backup.
+2. Validate the JSON backup in `Sprawdź backup`.
+3. Preview a CSV in `Import CSV — dry run`.
+4. Run actual restore/import only after a future importer is implemented.
+
+C6.0c detects:
+
+- delimiter: comma, semicolon or tab,
+- quoted values and escaped quotes,
+- headers and duplicate headers,
+- row count and first preview rows,
+- likely generic CSV type: `assets`, `transactions`, `income_events`, `cash_ledger_entries`, `edo_bonds` or unknown,
+- missing required columns for recognized C6.0a export formats,
+- suspicious sample dates and numeric values,
+- decimal comma usage,
+- unsupported currencies outside the current basic set,
+- transactions without `asset_id` or `symbol`,
+- income events without `payment_date`,
+- files that look like XTB or IBKR exports.
+
+The mapping preview is visual only. For recognized C6.0a CSV exports it shows which columns would map to future import fields, but the import button remains disabled.
+
+Security notes:
+
+- CSV files are parsed locally in the browser.
+- CSV contents are not sent to Supabase and are not uploaded to an API route.
+- C6.0c does not use service-role credentials and does not add environment variables.
+- XTB and IBKR broker importers are intentionally future steps.
 
 ### SQL verification katalogu
 
