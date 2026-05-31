@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Database, Download, FileDown, KeyRound, Loader2, RefreshCw, ShieldCheck, Upload } from 'lucide-react'
+import type { ChangeEvent } from 'react'
+import { AlertTriangle, CheckCircle2, Database, Download, FileDown, KeyRound, Loader2, RefreshCw, ShieldCheck, Upload } from 'lucide-react'
 import { Shell, PageHeader, Card, FeatureNote, TrustBadge } from '@/components/Shell'
 import {
   buildPortfolioBackupJson,
@@ -10,6 +11,12 @@ import {
   type BackupExportOptions,
   type PortfolioBackupData,
 } from '@/lib/backup/export'
+import {
+  compareBackupToCurrentContext,
+  parseBackupJsonFile,
+  summarizeBackupWithCurrentContext,
+  type BackupValidationResult,
+} from '@/lib/backup/validate'
 import { getBackupContext, fetchPortfolioBackupData, BACKUP_EXPORT_LIMITS, type BackupContext } from '@/lib/supabase/backup'
 import { supabase } from '@/lib/supabase/client'
 
@@ -46,11 +53,21 @@ function countRows(data: PortfolioBackupData, table: CsvTableKey) {
   return data[table]?.length ?? 0
 }
 
+function validationTone(status: BackupValidationResult['status'] | undefined) {
+  if (status === 'valid') return { label: 'Backup wygląda poprawnie', className: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100', icon: CheckCircle2 }
+  if (status === 'warning') return { label: 'Backup ma ostrzeżenia', className: 'border-amber-500/20 bg-amber-500/10 text-amber-100', icon: AlertTriangle }
+  if (status === 'invalid') return { label: 'Backup jest niepoprawny', className: 'border-rose-500/20 bg-rose-500/10 text-rose-100', icon: AlertTriangle }
+  return { label: 'Nie wczytano backupu', className: 'border-white/10 bg-white/[0.03] text-slate-400', icon: ShieldCheck }
+}
+
 export default function SettingsPage() {
   const [context, setContext] = useState<BackupContext | null>(null)
   const [options, setOptions] = useState<BackupExportOptions>(defaultOptions)
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
+  const [validating, setValidating] = useState(false)
+  const [validationResult, setValidationResult] = useState<BackupValidationResult | null>(null)
+  const [validationFileName, setValidationFileName] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
 
@@ -123,13 +140,46 @@ export default function SettingsPage() {
   const counts = context?.counts
   const marketPricesLarge = Number(counts?.market_prices ?? 0) > BACKUP_EXPORT_LIMITS.marketPrices
   const snapshotsLarge = Number(counts?.portfolio_snapshots ?? 0) > BACKUP_EXPORT_LIMITS.snapshots
+  const validationSummary = useMemo(() => {
+    if (!validationResult?.backup) return validationResult?.summary ?? null
+    return summarizeBackupWithCurrentContext(validationResult.backup, context)
+  }, [context, validationResult])
+  const comparisonMessages = useMemo(() => {
+    if (!validationResult?.backup) return []
+    return compareBackupToCurrentContext(validationResult.backup, context)
+  }, [context, validationResult])
+  const validationState = validationTone(validationResult?.status)
+  const ValidationIcon = validationState.icon
+
+  async function handleBackupValidation(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    setValidating(true)
+    setError(null)
+    setSuccess(null)
+    setValidationFileName(file.name)
+    try {
+      setValidationResult(await parseBackupJsonFile(file))
+    } catch (err: any) {
+      setValidationResult({
+        status: 'invalid',
+        backup: null,
+        summary: null,
+        errors: [{ code: 'file-read-error', message: err?.message ?? 'Nie udało się odczytać pliku backupu.' }],
+        warnings: [],
+      })
+    } finally {
+      setValidating(false)
+      event.target.value = ''
+    }
+  }
 
   return (
     <Shell>
       <PageHeader
-        eyebrow="System · C6.0a"
+        eyebrow="System · C6.0a / C6.0b"
         title="Backup, Supabase i ustawienia"
-        description="Eksportuj czytelny backup danych przed przyszłymi importami XTB/IBKR. Ten etap nie przywraca danych i niczego nie importuje."
+        description="Eksportuj czytelny backup i sprawdź plik JSON w trybie dry run. Ten etap nie przywraca danych i niczego nie importuje."
       />
 
       {error ? <div className="mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
@@ -262,6 +312,83 @@ export default function SettingsPage() {
       </Card>
 
       <Card className="mt-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-white">Sprawdź backup</h3>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">Wczytaj backup JSON lokalnie w przeglądarce. Tryb dry run niczego nie zapisuje do bazy i nie wysyła pliku do API.</p>
+          </div>
+          <TrustBadge>Dry run</TrustBadge>
+        </div>
+
+        <div className="mt-5 grid gap-4 lg:grid-cols-[.8fr_1.2fr]">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-6 text-center transition hover:border-violet-300/40 hover:bg-violet-500/10">
+              <Upload className="mb-3 text-violet-300" size={24} />
+              <span className="font-semibold text-white">Wczytaj plik JSON</span>
+              <span className="mt-1 text-xs text-slate-500">Plik zostaje w przeglądarce. Restore jest niedostępny w tym etapie.</span>
+              <input type="file" accept="application/json,.json" onChange={handleBackupValidation} className="hidden" />
+            </label>
+            {validating ? <div className="mt-4 flex items-center gap-2 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Sprawdzam backup...</div> : null}
+            {validationFileName ? <p className="mt-4 text-xs text-slate-500">Ostatni plik: {validationFileName}</p> : null}
+            <button
+              type="button"
+              disabled
+              className="mt-4 inline-flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-2xl bg-white/5 px-4 py-3 text-sm font-semibold text-slate-500"
+            >
+              Restore niedostępny w tym etapie
+            </button>
+          </div>
+
+          <div className="space-y-4">
+            <div className={`rounded-2xl border p-4 ${validationState.className}`}>
+              <div className="flex items-center gap-2 font-semibold"><ValidationIcon size={18} /> {validationState.label}</div>
+              <p className="mt-2 text-sm opacity-80">Nic nie zostanie zapisane. Ten panel pokazuje tylko strukturę, zgodność i ostrzeżenia pliku.</p>
+            </div>
+
+            {validationSummary ? (
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                <h4 className="font-semibold text-white">Metadata</h4>
+                <div className="mt-4 grid gap-3 text-sm md:grid-cols-2">
+                  <InfoLine label="App" value={validationSummary.app ?? '—'} />
+                  <InfoLine label="Wersja eksportu" value={validationSummary.exportVersion ?? '—'} />
+                  <InfoLine label="Data eksportu" value={validationSummary.exportedAt ?? '—'} />
+                  <InfoLine label="Portfolio" value={validationSummary.portfolioName ?? validationSummary.portfolioId ?? '—'} />
+                  <InfoLine label="Portfolio ID" value={validationSummary.portfolioId ?? '—'} />
+                  <InfoLine label="Waluta bazowa" value={validationSummary.baseCurrency ?? '—'} />
+                </div>
+              </div>
+            ) : null}
+
+            {validationSummary ? (
+              <div className="overflow-x-auto rounded-2xl border border-white/10">
+                <table className="w-full min-w-[560px] text-sm">
+                  <thead className="bg-white/[0.04] text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr><th className="p-3">Tabela</th><th className="p-3 text-right">Backup</th><th className="p-3 text-right">Metadata</th><th className="p-3 text-right">Obecnie</th></tr>
+                  </thead>
+                  <tbody>
+                    {validationSummary.tableSummaries.map((row) => (
+                      <tr key={row.table} className="border-t border-white/10">
+                        <td className="p-3 font-semibold text-white">{row.table}</td>
+                        <td className="p-3 text-right text-slate-300">{formatCount(row.rows)}</td>
+                        <td className="p-3 text-right text-slate-500">{row.metadataCount == null ? '—' : formatCount(row.metadataCount)}</td>
+                        <td className="p-3 text-right text-slate-500">{row.currentCount == null ? '—' : formatCount(row.currentCount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+
+            {comparisonMessages.length > 0 ? (
+              <MessageList title="Porównanie z obecnym portfolio" messages={comparisonMessages.map((item) => item.message)} tone="cyan" />
+            ) : null}
+            {validationResult?.warnings.length ? <MessageList title="Ostrzeżenia" messages={validationResult.warnings.map((item) => item.message)} tone="amber" /> : null}
+            {validationResult?.errors.length ? <MessageList title="Błędy pliku" messages={validationResult.errors.map((item) => item.message)} tone="rose" /> : null}
+          </div>
+        </div>
+      </Card>
+
+      <Card className="mt-6">
         <div className="flex items-start gap-4">
           <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-white/10 text-slate-200"><Upload size={22} /></div>
           <div>
@@ -278,6 +405,32 @@ export default function SettingsPage() {
         <p className="mt-2 text-sm leading-6 text-slate-400">Dane mają być przenośne: migracje SQL są w repo, aplikacja daje eksport JSON/CSV, a pg_dump pozostaje opcjonalnym backupem technicznym.</p>
       </Card>
     </Shell>
+  )
+}
+
+function InfoLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl bg-white/[0.04] p-3">
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className="mt-1 break-all font-semibold text-white">{value}</p>
+    </div>
+  )
+}
+
+function MessageList({ title, messages, tone }: { title: string; messages: string[]; tone: 'amber' | 'rose' | 'cyan' }) {
+  const classes = tone === 'rose'
+    ? 'border-rose-500/20 bg-rose-500/10 text-rose-100'
+    : tone === 'amber'
+      ? 'border-amber-500/20 bg-amber-500/10 text-amber-100'
+      : 'border-cyan-500/20 bg-cyan-500/10 text-cyan-100'
+
+  return (
+    <div className={`rounded-2xl border p-4 text-sm ${classes}`}>
+      <h4 className="font-semibold">{title}</h4>
+      <ul className="mt-3 space-y-2">
+        {messages.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
+      </ul>
+    </div>
   )
 }
 

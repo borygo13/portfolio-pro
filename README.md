@@ -627,8 +627,8 @@ Security and deployment notes:
 - It does not use `SUPABASE_SERVICE_ROLE_KEY`.
 - It does not export env vars, auth tokens, API keys, `CRON_SECRET`, `EODHD_API_KEY` or unrelated users’ data.
 - No new environment variable is required.
-- Restore is intentionally not implemented yet. Do not treat this as the only long-term backup until C6.0b restore/import backup exists.
-- Before future C6.0c/C6.0d/C6.1 imports, download a JSON backup first.
+- Restore is intentionally not implemented yet. Do not treat this as the only long-term backup until actual restore/import backup exists.
+- Before future C6 imports, download a JSON backup first.
 
 Large-table limits in C6.0a:
 
@@ -640,10 +640,59 @@ Large-table limits in C6.0a:
 
 TODOs:
 
-- C6.0b: restore/import backup flow,
-- C6.0c: simple CSV import,
-- C6.0d: XTB CSV import,
+- C6.0b: dry-run backup validation,
+- C6.0c: actual restore/import backup flow,
+- C6.0d: simple CSV import,
+- C6.0e: XTB CSV import,
 - C6.1: IBKR import.
+
+### Stage C6.0b - Backup Restore Dry Run / Validation
+
+C6.0b adds local backup JSON validation. It does not write to Supabase, does not restore data, does not delete data and does not import broker CSV files.
+
+Use it from:
+
+```text
+Backup / Ustawienia -> Sprawdź backup
+```
+
+The validation flow:
+
+1. Export a JSON backup.
+2. Open Backup / Ustawienia.
+3. Select the JSON file in “Sprawdź backup”.
+4. Review metadata, table counts, warnings and current-portfolio comparison.
+5. Only after a future importer exists, run imports after a validated backup.
+
+C6.0b validates:
+
+- JSON parses successfully,
+- top-level `metadata` and `data` exist,
+- `metadata.app` is `portfolio-pro`,
+- `metadata.export_version` exists and supports `c6.0a`,
+- `metadata.exported_at` exists,
+- `portfolio` exists,
+- core arrays exist: `assets`, `transactions`, `income_events`, `cash_ledger_entries`, `edo_bonds`,
+- metadata table counts roughly match array lengths,
+- backup does not claim restore is implemented,
+- duplicate IDs,
+- transactions and income events referencing missing assets,
+- records missing or differing by `portfolio_id`,
+- incomplete EDO rows,
+- suspicious secret-like keys or values.
+
+The app also compares the backup with the current portfolio:
+
+- same or different `portfolio_id`,
+- base currency mismatch,
+- table count differences.
+
+Security notes:
+
+- The backup file is parsed locally in the browser.
+- Backup contents are not uploaded to an API route and are not sent to Supabase.
+- C6.0b does not use service-role credentials and does not add environment variables.
+- A warning does not block preview; it tells you what future restore/import code would need to handle safely.
 
 ### SQL verification katalogu
 
