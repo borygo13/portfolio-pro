@@ -587,6 +587,64 @@ group by base_currency
 order by base_currency;
 ```
 
+### Stage C6.0a - Backup / Export Foundation
+
+C6.0a adds manual export before future broker imports. It does not import, restore, mutate, delete or reconcile data.
+
+Use it from:
+
+```text
+Backup / Ustawienia -> Backup danych
+```
+
+Core JSON backup includes:
+
+- `metadata` with app name, export version `c6.0a`, export time, portfolio id/name, base currency, table counts and restore warning,
+- `portfolio`,
+- `assets`,
+- `transactions` including C5.8 source/base currency and FX fields,
+- `income_events` including C5.9 gross/net/tax/source/base/FX fields,
+- `cash_ledger_entries`,
+- `edo_bonds`,
+- `portfolio_benchmarks`,
+- legacy `dividends` records for compatibility,
+- `asset_prices` when the “latest/manual prices” checkbox is enabled.
+
+Optional JSON backup data:
+
+- `portfolio_snapshots`, because they are derived and can be rebuilt,
+- `market_prices`, because provider history can be large,
+- `price_refresh_runs` and `price_refresh_run_items`, only when market history export is enabled.
+
+CSV export:
+
+- separate CSV downloads are available for `assets`, `transactions`, `income_events`, `cash_ledger_entries` and `edo_bonds`,
+- CSV uses stable headers and escapes commas, quotes, newlines and Polish characters safely.
+
+Security and deployment notes:
+
+- C6.0a uses the normal browser Supabase client and existing RLS for the authenticated user’s portfolio.
+- It does not use `SUPABASE_SERVICE_ROLE_KEY`.
+- It does not export env vars, auth tokens, API keys, `CRON_SECRET`, `EODHD_API_KEY` or unrelated users’ data.
+- No new environment variable is required.
+- Restore is intentionally not implemented yet. Do not treat this as the only long-term backup until C6.0b restore/import backup exists.
+- Before future C6.0c/C6.0d/C6.1 imports, download a JSON backup first.
+
+Large-table limits in C6.0a:
+
+- core tables: 20 000 rows per table,
+- `portfolio_snapshots`: 10 000 rows,
+- `market_prices`: 50 000 rows,
+- refresh runs: 5 000 rows,
+- refresh run items: 10 000 rows.
+
+TODOs:
+
+- C6.0b: restore/import backup flow,
+- C6.0c: simple CSV import,
+- C6.0d: XTB CSV import,
+- C6.1: IBKR import.
+
 ### SQL verification katalogu
 
 ```sql
