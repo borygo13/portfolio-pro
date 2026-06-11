@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent } from 'react'
-import { AlertTriangle, CheckCircle2, Database, Download, FileDown, FileSearch, KeyRound, Loader2, RefreshCw, ShieldCheck, Upload } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Database, Download, FileDown, FileSearch, KeyRound, Loader2, RefreshCw, RotateCcw, ShieldCheck, Upload } from 'lucide-react'
 import { Shell, PageHeader, Card, FeatureNote, TrustBadge } from '@/components/Shell'
 import {
   buildPortfolioBackupJson,
@@ -23,6 +23,13 @@ import {
   parseCsvText,
   type CsvDryRunSummary,
 } from '@/lib/import/csv-dry-run'
+import {
+  buildRestorePlan,
+  restorePortfolioCoreBackup,
+  RESTORE_CONFIRMATION_TEXT,
+  type RestoreExecutionSummary,
+  type RestorePlan,
+} from '@/lib/backup/restore'
 import { getBackupContext, fetchPortfolioBackupData, BACKUP_EXPORT_LIMITS, type BackupContext } from '@/lib/supabase/backup'
 import { supabase } from '@/lib/supabase/client'
 
@@ -84,6 +91,10 @@ export default function SettingsPage() {
   const [csvDryRunLoading, setCsvDryRunLoading] = useState(false)
   const [csvDryRunResult, setCsvDryRunResult] = useState<CsvDryRunSummary | null>(null)
   const [csvDryRunFileName, setCsvDryRunFileName] = useState('')
+  const [restoreAcknowledged, setRestoreAcknowledged] = useState(false)
+  const [restoreConfirmation, setRestoreConfirmation] = useState('')
+  const [restoring, setRestoring] = useState(false)
+  const [restoreResult, setRestoreResult] = useState<RestoreExecutionSummary | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
 
@@ -168,6 +179,14 @@ export default function SettingsPage() {
   const ValidationIcon = validationState.icon
   const csvState = csvImportTone(csvDryRunResult?.status)
   const CsvStateIcon = csvState.icon
+  const restorePlan = useMemo(() => buildRestorePlan(validationResult, context), [context, validationResult])
+  const restoreReady = Boolean(
+    context
+    && validationResult?.backup
+    && restorePlan?.restorable
+    && restoreAcknowledged
+    && restoreConfirmation.trim() === RESTORE_CONFIRMATION_TEXT,
+  )
 
   async function handleBackupValidation(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
@@ -178,6 +197,9 @@ export default function SettingsPage() {
     setValidationFileName(file.name)
     try {
       setValidationResult(await parseBackupJsonFile(file))
+      setRestoreAcknowledged(false)
+      setRestoreConfirmation('')
+      setRestoreResult(null)
     } catch (err: any) {
       setValidationResult({
         status: 'invalid',
@@ -186,6 +208,9 @@ export default function SettingsPage() {
         errors: [{ code: 'file-read-error', message: err?.message ?? 'Nie udało się odczytać pliku backupu.' }],
         warnings: [],
       })
+      setRestoreAcknowledged(false)
+      setRestoreConfirmation('')
+      setRestoreResult(null)
     } finally {
       setValidating(false)
       event.target.value = ''
@@ -223,12 +248,32 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleRestoreBackup() {
+    if (!context || !validationResult?.backup || !restorePlan?.restorable) return
+    setRestoring(true)
+    setError(null)
+    setSuccess(null)
+    setRestoreResult(null)
+    try {
+      const result = await restorePortfolioCoreBackup(context.portfolio.id, validationResult.backup)
+      setRestoreResult(result)
+      setSuccess('Restore zakończony. Odświeżyłem liczniki portfolio; utwórz świeży backup po weryfikacji danych.')
+      setRestoreAcknowledged(false)
+      setRestoreConfirmation('')
+      await loadContext()
+    } catch (err: any) {
+      setError(err?.message ?? 'Restore backupu nie powiódł się.')
+    } finally {
+      setRestoring(false)
+    }
+  }
+
   return (
     <Shell>
       <PageHeader
-        eyebrow="System · C6.0a / C6.0b / C6.0c"
+        eyebrow="System · C6.0a / C6.0b / C6.0c / C6.0d"
         title="Backup, Supabase i ustawienia"
-        description="Eksportuj czytelny backup, sprawdź plik JSON i podejrzyj CSV w trybie dry run. Ten etap niczego nie importuje."
+        description="Eksportuj backup, sprawdź plik JSON, podejrzyj CSV i bezpiecznie przywróć podstawowe dane portfolio."
       />
 
       {error ? <div className="mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
@@ -356,7 +401,7 @@ export default function SettingsPage() {
         </div>
 
         <FeatureNote>
-          Przywracanie backupu będzie dodane w kolejnym kroku. Na ten moment backup służy jako bezpieczna kopia danych przed importem i jako czytelny audyt tego, co jest w Supabase.
+          Backup JSON jest punktem bezpieczeństwa przed restore i przyszłymi importami. Restore C6.0d wymaga walidacji, planu, checkboxa i wpisania potwierdzenia.
         </FeatureNote>
       </Card>
 
@@ -374,7 +419,7 @@ export default function SettingsPage() {
             <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-6 text-center transition hover:border-violet-300/40 hover:bg-violet-500/10">
               <Upload className="mb-3 text-violet-300" size={24} />
               <span className="font-semibold text-white">Wczytaj plik JSON</span>
-              <span className="mt-1 text-xs text-slate-500">Plik zostaje w przeglądarce. Restore jest niedostępny w tym etapie.</span>
+              <span className="mt-1 text-xs text-slate-500">Plik zostaje w przeglądarce. Restore jest dostępny dopiero po walidacji i planie poniżej.</span>
               <input type="file" accept="application/json,.json" onChange={handleBackupValidation} className="hidden" />
             </label>
             {validating ? <div className="mt-4 flex items-center gap-2 text-sm text-slate-400"><Loader2 className="animate-spin" size={16} /> Sprawdzam backup...</div> : null}
@@ -384,7 +429,7 @@ export default function SettingsPage() {
               disabled
               className="mt-4 inline-flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-2xl bg-white/5 px-4 py-3 text-sm font-semibold text-slate-500"
             >
-              Restore niedostępny w tym etapie
+              Restore wymaga planu i potwierdzenia poniżej
             </button>
           </div>
 
@@ -435,6 +480,38 @@ export default function SettingsPage() {
             {validationResult?.errors.length ? <MessageList title="Błędy pliku" messages={validationResult.errors.map((item) => item.message)} tone="rose" /> : null}
           </div>
         </div>
+      </Card>
+
+      <Card className="mt-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-white">Restore backupu</h3>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">Zastępuje podstawowe dane obecnego portfolio danymi z backupu JSON. Wymaga planu, checkboxa i wpisania potwierdzenia.</p>
+          </div>
+          <TrustBadge>RPC · atomic</TrustBadge>
+        </div>
+
+        <FeatureNote>
+          Ten restore przywraca dane podstawowe. Historia cen, snapshoty i logi refreshu nie są przywracane w tym etapie.
+        </FeatureNote>
+
+        {restorePlan ? (
+          <RestorePlanPanel
+            plan={restorePlan}
+            result={restoreResult}
+            acknowledged={restoreAcknowledged}
+            confirmation={restoreConfirmation}
+            restoring={restoring}
+            restoreReady={restoreReady}
+            onAcknowledgedChange={setRestoreAcknowledged}
+            onConfirmationChange={setRestoreConfirmation}
+            onRestore={handleRestoreBackup}
+          />
+        ) : (
+          <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-5 text-sm text-slate-400">
+            Wczytaj i sprawdź backup JSON w sekcji “Sprawdź backup”, żeby zobaczyć plan restore.
+          </div>
+        )}
       </Card>
 
       <Card className="mt-6">
@@ -549,6 +626,157 @@ function MessageList({ title, messages, tone }: { title: string; messages: strin
       <ul className="mt-3 space-y-2">
         {messages.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
       </ul>
+    </div>
+  )
+}
+
+function RestorePlanPanel({
+  plan,
+  result,
+  acknowledged,
+  confirmation,
+  restoring,
+  restoreReady,
+  onAcknowledgedChange,
+  onConfirmationChange,
+  onRestore,
+}: {
+  plan: RestorePlan
+  result: RestoreExecutionSummary | null
+  acknowledged: boolean
+  confirmation: string
+  restoring: boolean
+  restoreReady: boolean
+  onAcknowledgedChange: (value: boolean) => void
+  onConfirmationChange: (value: string) => void
+  onRestore: () => void
+}) {
+  return (
+    <div className="mt-5 space-y-4">
+      <div className={`rounded-2xl border p-4 ${plan.restorable ? 'border-amber-500/20 bg-amber-500/10 text-amber-100' : 'border-rose-500/20 bg-rose-500/10 text-rose-100'}`}>
+        <div className="flex items-center gap-2 font-semibold">
+          <AlertTriangle size={18} />
+          {plan.restorable ? 'Plan restore gotowy do potwierdzenia' : 'Restore zablokowany'}
+        </div>
+        <p className="mt-2 text-sm opacity-85">
+          Ta operacja zastąpi podstawowe dane obecnego portfolio. Operacji nie da się cofnąć bez kolejnego backupu.
+        </p>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+          <h4 className="font-semibold text-white">Portfolio obecne</h4>
+          <div className="mt-4 grid gap-3 text-sm">
+            <InfoLine label="Nazwa" value={plan.currentPortfolioName ?? '—'} />
+            <InfoLine label="Portfolio ID" value={plan.currentPortfolioId ?? '—'} />
+            <InfoLine label="Waluta portfela" value={plan.currentBaseCurrency ?? '—'} />
+          </div>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+          <h4 className="font-semibold text-white">Backup</h4>
+          <div className="mt-4 grid gap-3 text-sm">
+            <InfoLine label="Nazwa" value={plan.backupPortfolioName ?? '—'} />
+            <InfoLine label="Portfolio ID" value={plan.backupPortfolioId ?? '—'} />
+            <InfoLine label="Waluta backupu" value={plan.backupBaseCurrency ?? '—'} />
+          </div>
+        </div>
+      </div>
+
+      {plan.samePortfolio === false ? <MessageList title="Uwaga" messages={['Ten backup wygląda na inny portfel. Restore nadal zapisze dane do obecnego portfolio i nie użyje backup user_id.']} tone="amber" /> : null}
+      {plan.currencyMismatch ? <MessageList title="Waluta" messages={['Waluta backupu różni się od obecnej waluty portfolio. Dane zostaną przywrócone, ale portfolio zachowa obecną walutę.']} tone="amber" /> : null}
+      {plan.hardErrors.length ? <MessageList title="Błędy blokujące restore" messages={plan.hardErrors.map((item) => item.message)} tone="rose" /> : null}
+      {plan.warnings.length ? <MessageList title="Ostrzeżenia planu" messages={plan.warnings.map((item) => item.message)} tone="amber" /> : null}
+
+      <div className="overflow-x-auto rounded-2xl border border-white/10">
+        <table className="w-full min-w-[560px] text-sm">
+          <thead className="bg-white/[0.04] text-left text-xs uppercase tracking-wide text-slate-500">
+            <tr><th className="p-3">Tabela core</th><th className="p-3 text-right">Usunie obecnie</th><th className="p-3 text-right">Wstawi z backupu</th></tr>
+          </thead>
+          <tbody>
+            {plan.tablePlans.map((row) => (
+              <tr key={row.table} className="border-t border-white/10">
+                <td className="p-3 font-semibold text-white">{row.table}</td>
+                <td className="p-3 text-right text-slate-500">{row.currentRows == null ? '—' : formatCount(row.currentRows)}</td>
+                <td className="p-3 text-right text-slate-300">{formatCount(row.backupRows)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="overflow-x-auto rounded-2xl border border-white/10">
+        <table className="w-full min-w-[560px] text-sm">
+          <thead className="bg-white/[0.04] text-left text-xs uppercase tracking-wide text-slate-500">
+            <tr><th className="p-3">Nieprzywracane</th><th className="p-3 text-right">W backupie</th><th className="p-3">Powód</th></tr>
+          </thead>
+          <tbody>
+            {plan.ignoredTables.map((row) => (
+              <tr key={row.table} className="border-t border-white/10">
+                <td className="p-3 font-semibold text-white">{row.table}</td>
+                <td className="p-3 text-right text-slate-300">{formatCount(row.backupRows)}</td>
+                <td className="p-3 text-slate-500">{row.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {result ? (
+        <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+          <h4 className="font-semibold">Restore zakończony</h4>
+          <p className="mt-2 opacity-85">{result.message ?? 'Podstawowe dane portfolio zostały przywrócone.'}</p>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <RestoreCountBox title="Usunięto" counts={result.deleted} />
+            <RestoreCountBox title="Wstawiono" counts={result.inserted} />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+        <label className="flex items-start gap-3 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={acknowledged}
+            onChange={(event) => onAcknowledgedChange(event.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-white/20 bg-slate-950 text-violet-500"
+          />
+          <span>Rozumiem, że przed restore powinienem mieć aktualny backup obecnego stanu.</span>
+        </label>
+        <div className="mt-4">
+          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Wpisz {RESTORE_CONFIRMATION_TEXT}</label>
+          <input
+            value={confirmation}
+            onChange={(event) => onConfirmationChange(event.target.value)}
+            placeholder={RESTORE_CONFIRMATION_TEXT}
+            className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm font-semibold text-white outline-none transition focus:border-violet-300/50"
+          />
+        </div>
+        <button
+          type="button"
+          disabled={!restoreReady || restoring}
+          onClick={onRestore}
+          className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-rose-500 px-5 py-4 text-sm font-bold text-white shadow-lg shadow-rose-950/30 transition hover:bg-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {restoring ? <Loader2 size={18} className="animate-spin" /> : <RotateCcw size={18} />}
+          Zastąp dane podstawowe z backupu
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function RestoreCountBox({ title, counts }: { title: string; counts: Record<string, number> }) {
+  return (
+    <div className="rounded-xl bg-white/[0.06] p-3">
+      <p className="text-xs font-semibold uppercase tracking-wide opacity-70">{title}</p>
+      <div className="mt-2 space-y-1">
+        {Object.entries(counts).map(([table, count]) => (
+          <div key={table} className="flex justify-between gap-3">
+            <span>{table}</span>
+            <span className="font-semibold">{formatCount(count)}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
