@@ -87,7 +87,7 @@ export function buildPortfolioBackupJson(data: PortfolioBackupData, options: Bac
     : 'PLN'
   const tableCounts = backupTableCounts(data)
   const warnings = [
-    'Restore/import from this backup is not implemented yet.',
+    'C6.0d can restore core user-entered data from this backup. Broker import and derived-history restore are not implemented.',
     options.includeMarketPrices
       ? 'Market price export can be large; verify table_counts against the Supabase database if you need an archival-grade market history backup.'
       : 'Core backup excludes market_prices by default because they are derived/provider data and can be large.',

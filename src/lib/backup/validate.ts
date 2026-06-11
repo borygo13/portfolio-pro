@@ -165,7 +165,7 @@ export async function parseBackupJsonFile(file: File): Promise<BackupValidationR
     const parsed = JSON.parse(text)
     const result = validatePortfolioBackupFile(parsed)
     if (file.size > 25 * 1024 * 1024) {
-      result.warnings.push(message('large-file', 'Plik backupu jest duży. Podgląd działa lokalnie, ale przyszły restore może wymagać dzielenia pracy na partie.'))
+      result.warnings.push(message('large-file', 'Plik backupu jest duży. Restore może wymagać dzielenia pracy na partie albo ręcznej weryfikacji.'))
       if (result.status === 'valid') result.status = 'warning'
     }
     return result
@@ -206,7 +206,7 @@ export function validatePortfolioBackupFile(raw: unknown): BackupValidationResul
     if (!version) warnings.push(message('missing-version', 'Brakuje metadata.export_version.'))
     else if (!SUPPORTED_EXPORT_VERSIONS.has(version)) warnings.push(message('unsupported-version', 'Ten backup pochodzi z innej wersji eksportu. Podgląd jest możliwy, ale restore może wymagać migracji.'))
     if (!asString(metadata.exported_at)) warnings.push(message('missing-exported-at', 'Brakuje metadata.exported_at.'))
-    if (metadata.restore_implemented === true) warnings.push(message('restore-claim', 'Backup deklaruje restore_implemented=true, ale aplikacja C6.0b nadal działa tylko w trybie dry run.'))
+    if (metadata.restore_implemented === true) warnings.push(message('restore-claim', 'Backup deklaruje restore_implemented=true. Przed restore nadal sprawdź plan C6.0d i zakres tabel.'))
   }
 
   if (data) {
@@ -217,7 +217,7 @@ export function validatePortfolioBackupFile(raw: unknown): BackupValidationResul
     }
     for (const table of OPTIONAL_TABLES) {
       if (table in data && data[table] !== undefined && !Array.isArray(data[table])) {
-        warnings.push(message(`invalid-optional-${table}`, `${table} nie jest tablicą, więc przyszły restore powinien pominąć tę sekcję.`))
+        warnings.push(message(`invalid-optional-${table}`, `${table} nie jest tablicą, więc restore pominie tę sekcję.`))
       }
     }
   }

@@ -589,7 +589,7 @@ order by base_currency;
 
 ### Stage C6.0a - Backup / Export Foundation
 
-C6.0a adds manual export before future broker imports. It does not import, restore, mutate, delete or reconcile data.
+C6.0a added manual export before future broker imports. By itself it does not import, mutate, delete or reconcile data; C6.0d adds a limited core-data restore from this JSON backup format.
 
 Use it from:
 
@@ -627,7 +627,8 @@ Security and deployment notes:
 - It does not use `SUPABASE_SERVICE_ROLE_KEY`.
 - It does not export env vars, auth tokens, API keys, `CRON_SECRET`, `EODHD_API_KEY` or unrelated users’ data.
 - No new environment variable is required.
-- Restore is intentionally not implemented yet. Do not treat this as the only long-term backup until actual restore/import backup exists.
+- C6.0d can restore core user-entered data from the JSON backup. It does not restore derived history such as `market_prices`, `portfolio_snapshots` or refresh logs.
+- Do not treat this as the only long-term archival backup for provider history until a broader restore/import flow exists.
 - Before future C6 imports, download a JSON backup first.
 
 Large-table limits in C6.0a:
@@ -642,7 +643,7 @@ TODOs:
 
 - C6.0b: dry-run backup validation,
 - C6.0c: simple CSV import dry run,
-- C6.0d: actual restore/import backup flow,
+- C6.0d: safe backup restore flow,
 - C6.0e: actual simple CSV import,
 - C6.0f: XTB CSV import,
 - C6.1: IBKR import.
@@ -663,7 +664,7 @@ The validation flow:
 2. Open Backup / Ustawienia.
 3. Select the JSON file in “Sprawdź backup”.
 4. Review metadata, table counts, warnings and current-portfolio comparison.
-5. Only after a future importer exists, run imports after a validated backup.
+5. Use the C6.0d restore panel only after reviewing the plan, or wait for future importers for CSV/broker files.
 
 C6.0b validates:
 
@@ -675,7 +676,7 @@ C6.0b validates:
 - `portfolio` exists,
 - core arrays exist: `assets`, `transactions`, `income_events`, `cash_ledger_entries`, `edo_bonds`,
 - metadata table counts roughly match array lengths,
-- backup does not claim restore is implemented,
+- legacy restore metadata flags,
 - duplicate IDs,
 - transactions and income events referencing missing assets,
 - records missing or differing by `portfolio_id`,
@@ -693,7 +694,7 @@ Security notes:
 - The backup file is parsed locally in the browser.
 - Backup contents are not uploaded to an API route and are not sent to Supabase.
 - C6.0b does not use service-role credentials and does not add environment variables.
-- A warning does not block preview; it tells you what future restore/import code would need to handle safely.
+- A warning does not block preview; it tells you what restore/import code needs to handle safely.
 
 ### Stage C6.0c - Simple CSV Import Dry Run
 
@@ -710,7 +711,7 @@ Recommended safety flow before future imports:
 1. Export a JSON backup.
 2. Validate the JSON backup in `Sprawdź backup`.
 3. Preview a CSV in `Import CSV — dry run`.
-4. Run actual restore/import only after a future importer is implemented.
+4. Run C6.0d JSON restore only after reviewing the restore plan, or wait for a future CSV importer.
 
 C6.0c detects:
 
@@ -735,6 +736,79 @@ Security notes:
 - CSV contents are not sent to Supabase and are not uploaded to an API route.
 - C6.0c does not use service-role credentials and does not add environment variables.
 - XTB and IBKR broker importers are intentionally future steps.
+
+### Stage C6.0d - Safe Backup Restore Flow
+
+C6.0d adds controlled restore from a validated `portfolio-pro` JSON backup. Restore is intentionally limited to core user-entered data and uses an additive Supabase RPC:
+
+```sql
+supabase/stage-c6-0d-safe-backup-restore.sql
+```
+
+Apply order:
+
+1. Apply `supabase/stage-c6-0d-safe-backup-restore.sql` in Supabase.
+2. Deploy the C6.0d app build.
+
+Use it from:
+
+```text
+Backup / Ustawienia -> Sprawdź backup -> Restore backupu
+```
+
+Recommended flow:
+
+1. Export a fresh JSON backup of the current state.
+2. Validate the JSON backup in `Sprawdź backup`.
+3. Review the restore plan.
+4. Confirm the backup-before-restore checkbox.
+5. Type `PRZYWRÓĆ`.
+6. Run restore.
+7. Visit Dashboard / Long-term / Dochody and export a fresh backup after verification.
+
+Restored core tables:
+
+- `assets`,
+- `transactions`,
+- `income_events`,
+- `cash_ledger_entries`,
+- `edo_bonds`,
+- `portfolio_benchmarks`,
+- `asset_prices`,
+- legacy `dividends` as `legacy_dividends` when present in backup.
+
+Not restored in C6.0d:
+
+- `market_prices`,
+- `portfolio_snapshots`,
+- `price_refresh_runs`,
+- `price_refresh_run_items`.
+
+These are derived/cache/provider tables and can be rebuilt later with price backfill, refresh and snapshot generation.
+
+Restore strategy:
+
+- Restore writes into the currently authenticated user’s current/default portfolio.
+- The current portfolio id and user id are preserved.
+- Backup `user_id` is not trusted.
+- Backup `portfolio_id` is informational only.
+- Asset ids are remapped to new ids during restore.
+- Dependent rows such as transactions, income events, asset prices, benchmarks and legacy dividends are remapped to the new asset ids.
+- The RPC runs as `security invoker`, checks `auth.uid()` ownership, uses existing RLS/table privileges and does not use service-role credentials.
+- The multi-table restore runs inside one database transaction. If a table insert fails, the restore rolls back.
+
+Safety gates:
+
+- Backup must have `metadata.app = portfolio-pro`.
+- Backup must have `metadata.export_version = c6.0a`.
+- Required core arrays must be present.
+- Restore plan shows current counts to replace, backup counts to insert, ignored tables and warnings.
+- Restore requires the backup-before-restore checkbox and exact confirmation text `PRZYWRÓĆ`.
+
+Known limitation:
+
+- C6.0d restores core data only. It does not restore historical market data, snapshots or refresh logs, and it does not implement broker import.
+- Because assets are replaced and remapped, database foreign-key cascades may clear derived rows tied to old asset ids. Rebuild market history and snapshots after a restore when needed.
 
 ### SQL verification katalogu
 
