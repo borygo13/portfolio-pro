@@ -644,8 +644,9 @@ TODOs:
 - C6.0b: dry-run backup validation,
 - C6.0c: simple CSV import dry run,
 - C6.0d: safe backup restore flow,
-- C6.0e: actual simple CSV import,
-- C6.0f: XTB CSV import,
+- C6.0e: simple Portfolio Pro CSV actual import,
+- C6.0f: XTB CSV import dry run / mapping,
+- C6.0g: XTB actual import,
 - C6.1: IBKR import.
 
 ### Stage C6.0b - Backup Restore Dry Run / Validation
@@ -664,7 +665,7 @@ The validation flow:
 2. Open Backup / Ustawienia.
 3. Select the JSON file in “Sprawdź backup”.
 4. Review metadata, table counts, warnings and current-portfolio comparison.
-5. Use the C6.0d restore panel only after reviewing the plan, or wait for future importers for CSV/broker files.
+5. Use the C6.0d restore panel only after reviewing the plan, use C6.0e for recognized Portfolio Pro CSV files, or wait for future importers for broker/custom files.
 
 C6.0b validates:
 
@@ -706,12 +707,12 @@ Use it from:
 Backup / Ustawienia -> Import CSV — dry run
 ```
 
-Recommended safety flow before future imports:
+Recommended safety flow before imports:
 
 1. Export a JSON backup.
 2. Validate the JSON backup in `Sprawdź backup`.
 3. Preview a CSV in `Import CSV — dry run`.
-4. Run C6.0d JSON restore only after reviewing the restore plan, or wait for a future CSV importer.
+4. Use C6.0e actual CSV import only for recognized Portfolio Pro CSV formats, or run C6.0d JSON restore only after reviewing the restore plan.
 
 C6.0c detects:
 
@@ -728,12 +729,12 @@ C6.0c detects:
 - income events without `payment_date`,
 - files that look like XTB or IBKR exports.
 
-The mapping preview is visual only. For recognized C6.0a CSV exports it shows which columns would map to future import fields, but the import button remains disabled.
+The mapping preview remains the first safety step. C6.0e adds an append-only import button for recognized Portfolio Pro CSV files after the preview is valid.
 
 Security notes:
 
 - CSV files are parsed locally in the browser.
-- CSV contents are not sent to Supabase and are not uploaded to an API route.
+- During C6.0c preview, CSV contents are not sent to Supabase and are not uploaded to an API route.
 - C6.0c does not use service-role credentials and does not add environment variables.
 - XTB and IBKR broker importers are intentionally future steps.
 
@@ -809,6 +810,76 @@ Known limitation:
 
 - C6.0d restores core data only. It does not restore historical market data, snapshots or refresh logs, and it does not implement broker import.
 - Because assets are replaced and remapped, database foreign-key cascades may clear derived rows tied to old asset ids. Rebuild market history and snapshots after a restore when needed.
+
+### Stage C6.0e - Simple CSV Actual Import
+
+C6.0e adds controlled append-only import for simple Portfolio Pro CSV files. It is not a broker importer and does not support XTB, IBKR, trading journal, Bybit, CFD, futures or reconciliation.
+
+Use it from:
+
+```text
+Backup / Ustawienia -> Import CSV — dry run + append
+```
+
+Supported import kinds:
+
+- `assets`,
+- `transactions`,
+- `income_events`,
+- `cash_ledger_entries`,
+- `edo_bonds`.
+
+The importer expects the same generic C6.0a-style CSV headers that the app exports. CSV is parsed in the browser first, then supported rows are inserted through the normal authenticated Supabase client and existing RLS.
+
+Safety flow:
+
+1. Export a fresh JSON backup.
+2. Validate the JSON backup in `Sprawdź backup`.
+3. Select the CSV file and review the C6.0c dry-run preview.
+4. Confirm the append-only import checkbox.
+5. Type `IMPORTUJ`.
+6. Run `Importuj CSV`.
+7. Verify inserted/skipped/failed counts.
+8. Export a fresh JSON backup after verification.
+
+Append-only behavior:
+
+- Existing rows are not deleted.
+- Existing rows are not updated or overwritten.
+- New supported rows are inserted.
+- `portfolio_id` and `user_id` from CSV are not trusted; current portfolio/current user are used.
+- Unknown, XTB-looking or IBKR-looking CSV files stay preview-only.
+
+Duplicate and matching rules:
+
+- `assets`: duplicate current-portfolio `symbol` or `market_symbol` rows are skipped.
+- `transactions`: rows must match an existing current-portfolio asset by `asset_id`, `symbol` or `market_symbol`. Assets are not auto-created from transactions.
+- `transactions`: inserts use the existing oversell-checked transaction RPC. Oversell rows fail and are reported.
+- `income_events`: asset matching is optional when the income model allows source-only events.
+- `cash_ledger_entries` and `edo_bonds`: imported append-only after required row validation.
+- C6.0e does not perform full duplicate recognition outside simple asset duplicate checks.
+
+Currency and FX rules:
+
+- Non-PLN/non-base transactions require valid base values or FX data. The importer does not fake FX.
+- Source/base transaction and income columns are preserved where present.
+- Income events may be imported with source currency only when base values/FX are unavailable, matching the C5.9 income model.
+
+Security notes:
+
+- No service role key is used.
+- No new environment variables are required.
+- CSV files are parsed locally in the browser.
+- Actual import writes supported rows to Supabase through the authenticated browser client and RLS.
+- Broker CSV import remains future work.
+
+Known limitations:
+
+- No replace mode.
+- No destructive cleanup.
+- No broker reconciliation.
+- No asset auto-create from transaction CSV files.
+- Exported transaction CSV from another portfolio may not import unless the target portfolio already has matching asset IDs or includes `symbol`/`market_symbol` columns.
 
 ### SQL verification katalogu
 
