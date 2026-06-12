@@ -21,8 +21,16 @@ import {
   buildCsvDryRunSummary,
   describeCsvDelimiter,
   parseCsvText,
+  type CsvParseResult,
   type CsvDryRunSummary,
 } from '@/lib/import/csv-dry-run'
+import {
+  buildCsvActualImportPlan,
+  importPortfolioCsv,
+  CSV_IMPORT_CONFIRMATION_TEXT,
+  type CsvActualImportPlan,
+  type CsvActualImportResult,
+} from '@/lib/import/csv-actual-import'
 import {
   buildRestorePlan,
   restorePortfolioCoreBackup,
@@ -90,7 +98,12 @@ export default function SettingsPage() {
   const [validationFileName, setValidationFileName] = useState('')
   const [csvDryRunLoading, setCsvDryRunLoading] = useState(false)
   const [csvDryRunResult, setCsvDryRunResult] = useState<CsvDryRunSummary | null>(null)
+  const [csvParsedResult, setCsvParsedResult] = useState<CsvParseResult | null>(null)
   const [csvDryRunFileName, setCsvDryRunFileName] = useState('')
+  const [csvImportAcknowledged, setCsvImportAcknowledged] = useState(false)
+  const [csvImportConfirmation, setCsvImportConfirmation] = useState('')
+  const [csvImporting, setCsvImporting] = useState(false)
+  const [csvImportResult, setCsvImportResult] = useState<CsvActualImportResult | null>(null)
   const [restoreAcknowledged, setRestoreAcknowledged] = useState(false)
   const [restoreConfirmation, setRestoreConfirmation] = useState('')
   const [restoring, setRestoring] = useState(false)
@@ -179,6 +192,15 @@ export default function SettingsPage() {
   const ValidationIcon = validationState.icon
   const csvState = csvImportTone(csvDryRunResult?.status)
   const CsvStateIcon = csvState.icon
+  const csvImportPlan = useMemo(() => buildCsvActualImportPlan(csvDryRunResult, csvParsedResult), [csvDryRunResult, csvParsedResult])
+  const csvImportReady = Boolean(
+    context
+    && csvParsedResult
+    && csvDryRunResult
+    && csvImportPlan?.importable
+    && csvImportAcknowledged
+    && csvImportConfirmation.trim() === CSV_IMPORT_CONFIRMATION_TEXT,
+  )
   const restorePlan = useMemo(() => buildRestorePlan(validationResult, context), [context, validationResult])
   const restoreReady = Boolean(
     context
@@ -224,10 +246,16 @@ export default function SettingsPage() {
     setError(null)
     setSuccess(null)
     setCsvDryRunFileName(file.name)
+    setCsvImportAcknowledged(false)
+    setCsvImportConfirmation('')
+    setCsvImportResult(null)
     try {
       const text = await file.text()
-      setCsvDryRunResult(buildCsvDryRunSummary(parseCsvText(text)))
+      const parsed = parseCsvText(text)
+      setCsvParsedResult(parsed)
+      setCsvDryRunResult(buildCsvDryRunSummary(parsed))
     } catch (err: any) {
+      setCsvParsedResult(null)
       setCsvDryRunResult({
         status: 'invalid',
         delimiter: null,
@@ -245,6 +273,26 @@ export default function SettingsPage() {
     } finally {
       setCsvDryRunLoading(false)
       event.target.value = ''
+    }
+  }
+
+  async function handleCsvImport() {
+    if (!context || !csvParsedResult || !csvDryRunResult || !csvImportPlan?.importable) return
+    setCsvImporting(true)
+    setError(null)
+    setSuccess(null)
+    setCsvImportResult(null)
+    try {
+      const result = await importPortfolioCsv(context.portfolio.id, context.portfolio.currency, csvParsedResult, csvDryRunResult)
+      setCsvImportResult(result)
+      setSuccess(`Import CSV zakończony: dodano ${formatCount(result.inserted)}, pominięto ${formatCount(result.skipped)}, błędy ${formatCount(result.failed)}. Po weryfikacji pobierz świeży backup JSON.`)
+      setCsvImportAcknowledged(false)
+      setCsvImportConfirmation('')
+      await loadContext()
+    } catch (err: any) {
+      setError(err?.message ?? 'Import CSV nie powiódł się.')
+    } finally {
+      setCsvImporting(false)
     }
   }
 
@@ -271,9 +319,9 @@ export default function SettingsPage() {
   return (
     <Shell>
       <PageHeader
-        eyebrow="System · C6.0a / C6.0b / C6.0c / C6.0d"
+        eyebrow="System · C6.0a / C6.0b / C6.0c / C6.0d / C6.0e"
         title="Backup, Supabase i ustawienia"
-        description="Eksportuj backup, sprawdź plik JSON, podejrzyj CSV i bezpiecznie przywróć podstawowe dane portfolio."
+        description="Eksportuj backup, sprawdź plik JSON, podejrzyj CSV, przywróć backup i importuj proste CSV Portfolio Pro append-only."
       />
 
       {error ? <div className="mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</div> : null}
@@ -401,7 +449,7 @@ export default function SettingsPage() {
         </div>
 
         <FeatureNote>
-          Backup JSON jest punktem bezpieczeństwa przed restore i przyszłymi importami. Restore C6.0d wymaga walidacji, planu, checkboxa i wpisania potwierdzenia.
+          Backup JSON jest punktem bezpieczeństwa przed restore i importem. Restore C6.0d i import C6.0e wymagają walidacji, planu, checkboxa i wpisania potwierdzenia.
         </FeatureNote>
       </Card>
 
@@ -517,14 +565,14 @@ export default function SettingsPage() {
       <Card className="mt-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <h3 className="text-lg font-bold text-white">Import CSV — dry run</h3>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">Wczytaj CSV lokalnie w przeglądarce. Ten etap pokazuje nagłówki, próbkę, typ importu i ostrzeżenia, ale niczego nie zapisuje do bazy.</p>
+            <h3 className="text-lg font-bold text-white">Import CSV — dry run + append</h3>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">Wczytaj CSV lokalnie w przeglądarce. Najpierw zobaczysz podgląd C6.0c, a potem możesz dopisać obsługiwane wiersze C6.0e do Supabase.</p>
           </div>
-          <TrustBadge>Preview only</TrustBadge>
+          <TrustBadge>Append only</TrustBadge>
         </div>
 
         <FeatureNote>
-          Najpierw pobierz i sprawdź backup JSON. Ten podgląd CSV nie tworzy aktywów, transakcji, dochodów ani wpisów cash ledger.
+          Najpierw pobierz i sprawdź backup JSON. Import C6.0e obsługuje tylko proste CSV Portfolio Pro: aktywa, transakcje, dochody, cash ledger i EDO. XTB/IBKR pozostają wyłączone.
         </FeatureNote>
 
         <div className="mt-5 grid gap-4 lg:grid-cols-[.8fr_1.2fr]">
@@ -542,14 +590,14 @@ export default function SettingsPage() {
               disabled
               className="mt-4 inline-flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-2xl bg-white/5 px-4 py-3 text-sm font-semibold text-slate-500"
             >
-              Import będzie dostępny w kolejnym etapie
+              Import wymaga planu i potwierdzenia po prawej
             </button>
           </div>
 
           <div className="space-y-4">
             <div className={`rounded-2xl border p-4 ${csvState.className}`}>
               <div className="flex items-center gap-2 font-semibold"><CsvStateIcon size={18} /> {csvState.label}</div>
-              <p className="mt-2 text-sm opacity-80">CSV zostaje lokalnie w przeglądarce. Nie ma uploadu, API route ani zapisu do Supabase.</p>
+              <p className="mt-2 text-sm opacity-80">Podgląd CSV działa lokalnie w przeglądarce. Dopiero potwierdzony import poniżej dopisuje obsługiwane wiersze do Supabase przez RLS.</p>
             </div>
 
             {csvDryRunResult ? (
@@ -580,6 +628,19 @@ export default function SettingsPage() {
             {csvDryRunResult?.sampleRows.length ? <CsvRowsPreview result={csvDryRunResult} /> : null}
             {csvDryRunResult?.warnings.length ? <MessageList title="Ostrzeżenia CSV" messages={csvDryRunResult.warnings.map((item) => item.message)} tone="amber" /> : null}
             {csvDryRunResult?.errors.length ? <MessageList title="Błędy CSV" messages={csvDryRunResult.errors.map((item) => item.message)} tone="rose" /> : null}
+            {csvImportPlan ? (
+              <CsvActualImportPanel
+                plan={csvImportPlan}
+                result={csvImportResult}
+                acknowledged={csvImportAcknowledged}
+                confirmation={csvImportConfirmation}
+                importing={csvImporting}
+                importReady={csvImportReady}
+                onAcknowledgedChange={setCsvImportAcknowledged}
+                onConfirmationChange={setCsvImportConfirmation}
+                onImport={handleCsvImport}
+              />
+            ) : null}
           </div>
         </div>
       </Card>
@@ -776,6 +837,98 @@ function RestoreCountBox({ title, counts }: { title: string; counts: Record<stri
             <span className="font-semibold">{formatCount(count)}</span>
           </div>
         ))}
+      </div>
+    </div>
+  )
+}
+
+function CsvActualImportPanel({
+  plan,
+  result,
+  acknowledged,
+  confirmation,
+  importing,
+  importReady,
+  onAcknowledgedChange,
+  onConfirmationChange,
+  onImport,
+}: {
+  plan: CsvActualImportPlan
+  result: CsvActualImportResult | null
+  acknowledged: boolean
+  confirmation: string
+  importing: boolean
+  importReady: boolean
+  onAcknowledgedChange: (value: boolean) => void
+  onConfirmationChange: (value: string) => void
+  onImport: () => void
+}) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+      <div className={`rounded-2xl border p-4 ${plan.importable ? 'border-cyan-500/20 bg-cyan-500/10 text-cyan-100' : 'border-amber-500/20 bg-amber-500/10 text-amber-100'}`}>
+        <div className="flex items-center gap-2 font-semibold">
+          {plan.importable ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
+          {plan.importable ? 'Import CSV gotowy do potwierdzenia' : 'Import CSV zablokowany'}
+        </div>
+        <p className="mt-2 text-sm opacity-85">
+          Tryb: append-only. Istniejące dane nie są usuwane, nadpisywane ani scalane.
+        </p>
+      </div>
+
+      <div className="mt-4 grid gap-3 text-sm md:grid-cols-2">
+        <InfoLine label="Typ importu" value={plan.importKindLabel} />
+        <InfoLine label="Wiersze do sprawdzenia" value={formatCount(plan.rowCount)} />
+        <InfoLine label="Zostanie dopisane" value={plan.importKind === 'unknown' ? '—' : plan.importKind} />
+        <InfoLine label="Nie zostanie ruszone" value="istniejące rekordy, market_prices, snapshoty, broker import" />
+      </div>
+
+      {plan.reasons.length ? <MessageList title="Dlaczego import jest wyłączony" messages={plan.reasons} tone="amber" /> : null}
+      {plan.warnings.length ? <div className="mt-4"><MessageList title="Zasady importu" messages={plan.warnings} tone="cyan" /></div> : null}
+
+      {result ? (
+        <div className="mt-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+          <h4 className="font-semibold">Import zakończony</h4>
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <InfoLine label="Dodano" value={formatCount(result.inserted)} />
+            <InfoLine label="Pominięto" value={formatCount(result.skipped)} />
+            <InfoLine label="Błędy" value={formatCount(result.failed)} />
+          </div>
+          {result.messages.length ? (
+            <ul className="mt-4 space-y-2 text-xs leading-5 text-emerald-50/85">
+              {result.messages.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+        <label className="flex items-start gap-3 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={acknowledged}
+            onChange={(event) => onAcknowledgedChange(event.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-white/20 bg-slate-950 text-cyan-500"
+          />
+          <span>Mam aktualny backup JSON i rozumiem, że import dopisze dane.</span>
+        </label>
+        <div className="mt-4">
+          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Wpisz {CSV_IMPORT_CONFIRMATION_TEXT}</label>
+          <input
+            value={confirmation}
+            onChange={(event) => onConfirmationChange(event.target.value)}
+            placeholder={CSV_IMPORT_CONFIRMATION_TEXT}
+            className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm font-semibold text-white outline-none transition focus:border-cyan-300/50"
+          />
+        </div>
+        <button
+          type="button"
+          disabled={!importReady || importing}
+          onClick={onImport}
+          className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-cyan-500 px-5 py-4 text-sm font-bold text-white shadow-lg shadow-cyan-950/30 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {importing ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
+          Importuj CSV
+        </button>
       </div>
     </div>
   )
