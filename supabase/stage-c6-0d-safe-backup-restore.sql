@@ -2,7 +2,7 @@
 -- Additive RPC only. Restores core user-entered data into the authenticated
 -- user's current portfolio with transaction semantics and without service role.
 
-create extension if not exists "uuid-ossp";
+create extension if not exists "uuid-ossp" with schema extensions;
 
 create or replace function restore_portfolio_core_backup(
   p_portfolio_id uuid,
@@ -75,7 +75,7 @@ begin
   drop table if exists pg_temp.restore_asset_map;
   create temporary table restore_asset_map (
     old_id uuid primary key,
-    new_id uuid not null default uuid_generate_v4()
+    new_id uuid not null default extensions.uuid_generate_v4()
   ) on commit drop;
 
   insert into restore_asset_map (old_id)
@@ -209,7 +209,7 @@ begin
     priced_at
   )
   select
-    uuid_generate_v4(),
+    extensions.uuid_generate_v4(),
     p_portfolio_id,
     m.new_id,
     coalesce(nullif(price_row.row_data ->> 'price', '')::numeric, 0),
